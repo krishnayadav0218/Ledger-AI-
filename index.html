@@ -1,0 +1,2780 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Ledger AI — Business Intelligence Dashboard</title>
+<meta name="description" content="Upload a CSV/Excel file and get instant KPIs, revenue forecasts, customer analytics, SQL generation, and an AI chat over your data." />
+<meta name="theme-color" content="#0B0E14" />
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%23E8B34D'/%3E%3Ctext x='16' y='23' font-size='18' font-family='Arial,sans-serif' font-weight='bold' text-anchor='middle' fill='%231a1305'%3EL%3C/text%3E%3C/svg%3E" />
+<link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin />
+<link rel="preconnect" href="https://cdnjs.cloudflare.com" crossorigin />
+<link rel="dns-prefetch" href="https://cdn.jsdelivr.net" />
+<link rel="dns-prefetch" href="https://cdnjs.cloudflare.com" />
+
+<!-- React + ReactDOM -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js" crossorigin></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js" crossorigin></script>
+<!-- Babel standalone: lets this single HTML file use JSX directly, no build step -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.24.7/babel.min.js" crossorigin></script>
+<!-- Data libs -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.5.4/papaparse.min.js" crossorigin></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js" crossorigin></script>
+<!-- Charts (prop-types is a required peer for Recharts' UMD build) -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prop-types/15.8.1/prop-types.min.js" crossorigin></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/recharts/2.15.0/Recharts.js" crossorigin></script>
+<!-- Pyodide: runs real Python (numpy/pandas) in-browser via WebAssembly.
+     This replaces the cloud AI API entirely — all analysis below is Python. -->
+<script src="https://cdn.jsdelivr.net/pyodide/v0.26.4/full/pyodide.js" crossorigin></script>
+<script>
+  // Start the heavy Python download the instant pyodide.js itself is
+  // available — don't wait for Babel to finish parsing our (large)
+  // embedded JSX+Python bundle and for React to mount first. That parse
+  // step alone can take a noticeable moment, and there's no reason the
+  // ~15-20MB numpy/pandas download can't be happening in parallel with it.
+  window.__pyodideReadyPromise = (async () => {
+    const pyodide = await loadPyodide({
+      indexURL: "https://cdn.jsdelivr.net/pyodide/v0.26.4/full/",
+    });
+    await pyodide.loadPackage(["numpy", "pandas"]);
+    return pyodide;
+  })();
+  // Mark as "handled" for the browser's unhandled-rejection warning — our
+  // React code still awaits the original promise and handles errors itself.
+  window.__pyodideReadyPromise.catch(() => {});
+</script>
+
+<style>
+  html, body { margin:0; padding:0; }
+  #root { min-height: 100vh; }
+</style>
+</head>
+<body>
+<div id="root">
+  <div style="min-height:100vh;display:flex;align-items:center;justify-content:center;background:#0B0E14;color:#8A93A6;font-family:system-ui,sans-serif;font-size:14px;">
+    Loading Ledger AI…
+  </div>
+</div>
+
+<script type="text/babel" data-presets="react">
+const { useState, useMemo, useRef, useCallback, useEffect } = React;
+// Papa and XLSX are already attached to window by their own scripts above —
+// redeclaring them with const would collide with their internal `var` globals.
+const {
+  LineChart, Line, BarChart, Bar, PieChart, Pie, Cell, AreaChart, Area, ComposedChart,
+  XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer
+} = Recharts;
+
+/* ---------------------------------------------------------------------
+   Minimal inline-SVG icon set standing in for lucide-react (which has no
+   plain <script> build). Same names/props used by the dashboard below,
+   so nothing else in the code needed to change for this standalone file.
+   --------------------------------------------------------------------- */
+function Icon({ children, size = 16, style, ...rest }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={style} {...rest}>
+      {children}
+    </svg>
+  );
+}
+const Upload = (p) => <Icon {...p}><path d="M12 3v12" /><polyline points="7,8 12,3 17,8" /><path d="M4 21h16" /></Icon>;
+const LayoutDashboard = (p) => <Icon {...p}><rect x="3" y="3" width="7" height="7" /><rect x="14" y="3" width="7" height="7" /><rect x="14" y="14" width="7" height="7" /><rect x="3" y="14" width="7" height="7" /></Icon>;
+const TrendingUp = (p) => <Icon {...p}><polyline points="3,17 9,11 13,15 21,6" /><polyline points="14,6 21,6 21,13" /></Icon>;
+const Users = (p) => <Icon {...p}><circle cx="9" cy="7" r="3" /><path d="M2 21v-1a6 6 0 0 1 6-6h2a6 6 0 0 1 6 6v1" /><circle cx="17.5" cy="8" r="2.3" /><path d="M17 14.2A5.2 5.2 0 0 1 22 19v1" /></Icon>;
+const Terminal = (p) => <Icon {...p}><rect x="3" y="4" width="18" height="16" rx="2" /><polyline points="7,9 10,12 7,15" /><line x1="12" y1="15" x2="16" y2="15" /></Icon>;
+const MessageSquare = (p) => <Icon {...p}><path d="M21 15a2 2 0 0 1-2 2H8l-5 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" /></Icon>;
+const FileDown = (p) => <Icon {...p}><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" /><polyline points="14,2 14,8 20,8" /><path d="M12 11v6" /><polyline points="9,14 12,17 15,14" /></Icon>;
+const Sparkles = (p) => <Icon {...p}><path d="M12 2l1.6 4.8L18 8l-4.4 1.6L12 14l-1.6-4.4L6 8l4.4-1.2z" /><path d="M19 14l.7 2.1L22 17l-2.3.9L19 20l-.7-2.1L16 17l2.3-.9z" /></Icon>;
+const Send = (p) => <Icon {...p}><polygon points="3,11 21,3 13,21 11,13 3,11" /></Icon>;
+const Loader2 = (p) => <Icon {...p}><path d="M21 12a9 9 0 1 1-9-9" /></Icon>;
+const BarChart3 = (p) => <Icon {...p}><line x1="4" y1="20" x2="4" y2="10" /><line x1="12" y1="20" x2="12" y2="4" /><line x1="20" y1="20" x2="20" y2="14" /><line x1="2" y1="20" x2="22" y2="20" /></Icon>;
+const Database = (p) => <Icon {...p}><ellipse cx="12" cy="5" rx="8" ry="3" /><path d="M4 5v14c0 1.7 3.6 3 8 3s8-1.3 8-3V5" /><path d="M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3" /></Icon>;
+const ArrowUpRight = (p) => <Icon {...p}><line x1="7" y1="17" x2="17" y2="7" /><polyline points="7,7 17,7 17,17" /></Icon>;
+const ArrowDownRight = (p) => <Icon {...p}><line x1="7" y1="7" x2="17" y2="17" /><polyline points="17,7 17,17 7,17" /></Icon>;
+const Copy = (p) => <Icon {...p}><rect x="9" y="9" width="12" height="12" rx="2" /><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" /></Icon>;
+const Check = (p) => <Icon {...p}><polyline points="20,6 9,17 4,12" /></Icon>;
+const Sun = (p) => <Icon {...p}><circle cx="12" cy="12" r="4" /><line x1="12" y1="2" x2="12" y2="4" /><line x1="12" y1="20" x2="12" y2="22" /><line x1="4" y1="12" x2="2" y2="12" /><line x1="22" y1="12" x2="20" y2="12" /><line x1="4.9" y1="4.9" x2="3.5" y2="3.5" /><line x1="19.1" y1="4.9" x2="20.5" y2="3.5" /><line x1="4.9" y1="19.1" x2="3.5" y2="20.5" /><line x1="19.1" y1="19.1" x2="20.5" y2="20.5" /></Icon>;
+const Moon = (p) => <Icon {...p}><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z" /></Icon>;
+const Filter = (p) => <Icon {...p}><polygon points="3,4 21,4 14,13 14,19 10,21 10,13" /></Icon>;
+const AlertTriangle = (p) => <Icon {...p}><path d="M12 2 1 21h22z" /><line x1="12" y1="9" x2="12" y2="14" /><circle cx="12" cy="17.5" r="0.5" fill="currentColor" /></Icon>;
+
+
+/* ---------------------------------- THEME ---------------------------------- */
+/* "Ledger" direction: a night-terminal for business numbers. Deep ink
+   background, brass/amber signal accent (the "insight" color), monospace
+   for anything numeric, Space Grotesk for display type. Signature element:
+   the scrolling KPI ticker tape at the top, like a trading-floor board. */
+
+const THEME = `
+  .bi-root.dark{
+    --bg:#0B0E14; --panel:#11151F; --panel2:#161B27; --border:#232A38;
+    --text:#E7E9EE; --muted:#8A93A6; --accent:#E8B34D; --accent-dim:#9C7A3A;
+    --accent-ink:#1a1305; --pos:#4ADE80; --neg:#F87171; --blue:#5B9BD9;
+    --code-bg:#0A0D12; --code-text:#C9D1D9;
+  }
+  .bi-root.light{
+    --bg:#F5F3EE; --panel:#FFFFFF; --panel2:#EFEBE1; --border:#DCD5C4;
+    --text:#241E12; --muted:#7A7160; --accent:#B8791E; --accent-dim:#D9A94A;
+    --accent-ink:#FFFFFF; --pos:#1D9A5B; --neg:#C4453A; --blue:#2E6DA4;
+    --code-bg:#EFEBE1; --code-text:#241E12;
+  }
+  .bi-root{
+    background:var(--bg); color:var(--text); min-height:100vh;
+    font-family:'Inter',system-ui,sans-serif; display:flex; flex-direction:column;
+    transition:background .2s ease, color .2s ease;
+  }
+  .bi-root *{box-sizing:border-box;}
+  .bi-display{font-family:'Space Grotesk','Inter',sans-serif;}
+  .bi-mono{font-family:'JetBrains Mono','Courier New',monospace;}
+
+  .ticker-wrap{
+    background:var(--panel2); border-bottom:1px solid var(--border);
+    overflow:hidden; white-space:nowrap; padding:8px 0; flex-shrink:0;
+  }
+  .ticker-track{display:inline-block; animation:ticker-scroll 28s linear infinite;}
+  .ticker-wrap:hover .ticker-track{animation-play-state:paused;}
+  @keyframes ticker-scroll{ 0%{transform:translateX(0);} 100%{transform:translateX(-50%);} }
+  @keyframes spin{ 0%{transform:rotate(0deg);} 100%{transform:rotate(360deg);} }
+  @keyframes fadeInUp{ from{opacity:0; transform:translateY(10px);} to{opacity:1; transform:translateY(0);} }
+  @keyframes fadeIn{ from{opacity:0;} to{opacity:1;} }
+  .fade-in-up{animation:fadeInUp .5s cubic-bezier(.16,1,.3,1) both;}
+  .view-fade{animation:fadeIn .35s ease both;}
+  .ticker-item{display:inline-flex; align-items:baseline; gap:6px; margin-right:40px; font-size:13px;}
+  .ticker-label{color:var(--muted); letter-spacing:.04em; text-transform:uppercase; font-size:10px;}
+  .ticker-value{font-family:'JetBrains Mono',monospace; font-weight:600;}
+  .ticker-up{color:var(--pos);} .ticker-down{color:var(--neg);}
+
+  .bi-body{display:flex; flex:1; min-height:0;}
+  .bi-sidebar{
+    width:210px; background:var(--panel); border-right:1px solid var(--border);
+    padding:18px 12px; flex-shrink:0; display:flex; flex-direction:column; gap:2px;
+  }
+  .bi-brand{display:flex; align-items:center; gap:8px; padding:0 8px 18px 8px; border-bottom:1px solid var(--border); margin-bottom:14px;}
+  .bi-brand-mark{width:26px; height:26px; border-radius:6px; background:linear-gradient(135deg,var(--accent),var(--accent-dim)); display:flex; align-items:center; justify-content:center; color:var(--accent-ink); font-weight:800; font-size:13px;}
+  .bi-brand-name{font-weight:700; font-size:15px; letter-spacing:-0.01em;}
+  .nav-item{
+    display:flex; align-items:center; gap:10px; padding:9px 10px; border-radius:8px;
+    color:var(--muted); font-size:13.5px; cursor:pointer; border:1px solid transparent;
+    transition:all .15s ease; background:transparent;
+    width:100%; text-align:left; font-family:inherit;
+  }
+  .nav-item:focus-visible{outline:2px solid var(--accent); outline-offset:1px;}
+  .nav-item:hover{background:var(--panel2); color:var(--text);}
+  .nav-item.active{background:var(--panel2); color:var(--accent); border-color:var(--border);}
+  .nav-item svg{flex-shrink:0;}
+
+  .bi-main{flex:1; min-width:0; display:flex; flex-direction:column; overflow-y:auto;}
+  .bi-topbar{
+    display:flex; align-items:center; justify-content:space-between; gap:12px;
+    padding:14px 22px; border-bottom:1px solid var(--border); background:var(--bg);
+    position:sticky; top:0; z-index:5;
+  }
+  .bi-topbar-title{font-size:16px; font-weight:700;}
+  .bi-topbar-sub{color:var(--muted); font-size:12px; margin-top:2px;}
+  .bi-content{padding:22px; flex:1;}
+
+  .btn{
+    display:inline-flex; align-items:center; gap:6px; padding:8px 14px; border-radius:7px;
+    font-size:12.5px; font-weight:600; cursor:pointer; border:1px solid var(--border);
+    background:var(--panel2); color:var(--text); transition:all .15s ease; white-space:nowrap;
+    font-family:inherit;
+  }
+  .btn:focus-visible{outline:2px solid var(--accent); outline-offset:1px;}
+  .btn:hover{border-color:var(--accent-dim);}
+  .btn:disabled{opacity:.5; cursor:not-allowed;}
+  .btn-accent{background:var(--accent); color:var(--accent-ink); border-color:var(--accent);}
+  .btn-accent:hover{filter:brightness(1.08);}
+
+  .card{background:var(--panel); border:1px solid var(--border); border-radius:10px; padding:16px; transition:transform .18s cubic-bezier(.16,1,.3,1), box-shadow .18s ease, border-color .18s ease;}
+  .card:hover{transform:translateY(-2px); box-shadow:0 10px 28px -8px rgba(0,0,0,0.35); border-color:var(--accent-dim);}
+  .bi-root.light .card:hover{box-shadow:0 10px 24px -8px rgba(30,20,5,0.18);}
+  .kpi-value{transition:color .2s ease;}
+  .card-title{font-size:11px; text-transform:uppercase; letter-spacing:.06em; color:var(--muted); margin-bottom:8px; display:flex; align-items:center; gap:6px;}
+  .lg-note-inline{text-transform:none; font-weight:400; letter-spacing:normal; font-size:10.5px; opacity:.75; margin-left:4px;}
+  .lg-badge{
+    text-transform:none; font-weight:600; letter-spacing:normal; font-size:10px;
+    background:var(--panel2); border:1px solid var(--border); color:var(--muted);
+    padding:2px 7px; border-radius:20px;
+  }
+  .kpi-grid{display:grid; grid-template-columns:repeat(auto-fit,minmax(190px,1fr)); gap:14px; margin-bottom:18px;}
+  .kpi-value{font-family:'JetBrains Mono',monospace; font-size:26px; font-weight:700; letter-spacing:-0.02em;}
+  .kpi-delta{display:flex; align-items:center; gap:4px; font-size:12px; margin-top:6px;}
+
+  .grid-2{display:grid; grid-template-columns:1.4fr 1fr; gap:16px;}
+  .grid-3{display:grid; grid-template-columns:repeat(3,1fr); gap:16px;}
+  @media (max-width:900px){ .grid-2,.grid-3{grid-template-columns:1fr;} }
+
+  @media (max-width:720px){
+    .bi-body{flex-direction:column;}
+    .bi-sidebar{
+      width:100%; flex-direction:row; align-items:center; overflow-x:auto;
+      padding:10px 12px; gap:6px; border-right:none; border-bottom:1px solid var(--border);
+    }
+    .bi-brand{border-bottom:none; padding:0 10px 0 0; margin-bottom:0; flex-shrink:0;}
+    .nav-item{flex-shrink:0; white-space:nowrap;}
+    .bi-sidebar > div:last-child{display:none;}
+    .bi-topbar{flex-wrap:wrap; padding:12px 14px;}
+    .bi-content{padding:14px;}
+    .kpi-grid{grid-template-columns:repeat(auto-fit,minmax(140px,1fr));}
+  }
+
+  table.bi-table{width:100%; border-collapse:collapse; font-size:12.5px;}
+  table.bi-table th{text-align:left; color:var(--muted); font-weight:600; padding:8px 10px; border-bottom:1px solid var(--border); font-size:11px; text-transform:uppercase; letter-spacing:.04em;}
+  table.bi-table td{padding:8px 10px; border-bottom:1px solid var(--border); font-family:'JetBrains Mono',monospace;}
+  table.bi-table tr:last-child td{border-bottom:none;}
+
+  .dropzone{
+    border:1.5px dashed var(--border); border-radius:12px; padding:40px 20px; text-align:center;
+    cursor:pointer; transition:all .15s ease; background:var(--panel);
+  }
+  .dropzone:hover{border-color:var(--accent-dim); background:var(--panel2);}
+
+  .chat-scroll{flex:1; overflow-y:auto; padding:16px; display:flex; flex-direction:column; gap:12px;}
+  .chat-bubble-user{background:var(--panel2); border:1px solid var(--border); border-radius:10px 10px 2px 10px; padding:10px 14px; max-width:75%; align-self:flex-end; font-size:13.5px;}
+  .chat-bubble-ai{background:var(--panel); border:1px solid var(--border); border-radius:10px 10px 10px 2px; padding:10px 14px; max-width:80%; align-self:flex-start; font-size:13.5px; line-height:1.55; white-space:pre-wrap;}
+  .chat-input-row{display:flex; gap:8px; padding:12px; border-top:1px solid var(--border); background:var(--panel);}
+  .chat-input{flex:1; background:var(--panel2); border:1px solid var(--border); border-radius:8px; padding:10px 12px; color:var(--text); font-size:13.5px; outline:none;}
+  .chat-input:focus{border-color:var(--accent-dim);}
+
+  .code-block{background:var(--code-bg); border:1px solid var(--border); border-radius:8px; padding:14px 16px; font-family:'JetBrains Mono',monospace; font-size:12.5px; color:var(--code-text); white-space:pre-wrap; line-height:1.6; position:relative;}
+  .theme-toggle{
+    display:inline-flex; align-items:center; gap:6px; padding:8px 10px; border-radius:7px;
+    border:1px solid var(--border); background:var(--panel2); color:var(--text); cursor:pointer;
+  }
+  .theme-toggle:hover{border-color:var(--accent-dim);}
+  textarea.bi-textarea{width:100%; background:var(--panel2); border:1px solid var(--border); border-radius:8px; padding:10px 12px; color:var(--text); font-size:13.5px; outline:none; resize:vertical; min-height:70px; font-family:'Inter',sans-serif;}
+  textarea.bi-textarea:focus{border-color:var(--accent-dim);}
+  select.bi-select{
+    width:100%; background:var(--panel2); border:1px solid var(--border); border-radius:8px;
+    padding:9px 10px; color:var(--text); font-size:13px; outline:none; cursor:pointer;
+  }
+  select.bi-select:focus{border-color:var(--accent-dim);}
+  input.bi-date-input{
+    background:var(--panel2); border:1px solid var(--border); border-radius:7px;
+    padding:6px 9px; color:var(--text); font-size:12.5px; outline:none; color-scheme:dark;
+  }
+  .bi-root.light input.bi-date-input{color-scheme:light;}
+  input.bi-date-input:focus{border-color:var(--accent-dim);}
+  .filter-bar{
+    display:flex; align-items:center; gap:10px; padding:10px 22px;
+    border-bottom:1px solid var(--border); background:var(--panel); flex-wrap:wrap;
+  }
+  .toast-wrap{
+    position:fixed; top:16px; right:16px; z-index:50; max-width:380px;
+    background:var(--panel); border:1px solid var(--border); border-radius:10px;
+    padding:12px 14px; box-shadow:0 14px 36px -10px rgba(0,0,0,0.45);
+    display:flex; align-items:flex-start; gap:10px; animation:fadeInUp .3s cubic-bezier(.16,1,.3,1) both;
+  }
+  .toast-wrap.toast-success{border-color:var(--pos);}
+  .toast-wrap.toast-error{border-color:var(--neg);}
+  .toast-wrap.toast-warn{border-color:var(--accent);}
+  .toast-close{cursor:pointer; color:var(--muted); flex-shrink:0; background:none; border:none; padding:2px;}
+  .toast-close:hover{color:var(--text);}
+  .quality-row{display:flex; align-items:center; justify-content:space-between; padding:7px 0; border-bottom:1px solid var(--border); font-size:12.5px;}
+  .quality-row:last-child{border-bottom:none;}
+  .anomaly-item{display:flex; align-items:center; gap:8px; padding:6px 0; font-size:12.5px;}
+
+  ::-webkit-scrollbar{width:8px; height:8px;}
+  ::-webkit-scrollbar-thumb{background:var(--border); border-radius:4px;}
+
+  @media print{
+    .bi-sidebar, .bi-topbar-actions, .ticker-wrap, .no-print, .filter-bar, .toast-wrap{display:none !important;}
+    .bi-root, .bi-main{overflow:visible !important; height:auto !important;}
+    .card{break-inside:avoid;}
+    select.bi-select, .chat-input-row{display:none !important;}
+  }
+`;
+
+const PIE_COLORS = ["#E8B34D", "#5B9BD9", "#4ADE80", "#F87171", "#B084F0", "#63D9C9"];
+
+const LANGUAGES = [
+  { id: "hinglish", label: "Hinglish (default)" },
+  { id: "hindi", label: "\u0939\u093f\u0902\u0926\u0940 (Hindi)" },
+  { id: "english", label: "English" },
+  { id: "marathi", label: "\u092e\u0930\u093e\u0920\u0940 (Marathi)" },
+  { id: "gujarati", label: "\u0a97\u0ac1\u0a9c\u0ab0\u0abe\u0aa4\u0ac0 (Gujarati)" },
+  { id: "bengali", label: "\u09ac\u09be\u0982\u09b2\u09be (Bengali)" },
+  { id: "tamil", label: "\u0ba4\u0bae\u0bbf\u0bb4\u0bcd (Tamil)" },
+  { id: "telugu", label: "\u0c24\u0c46\u0c32\u0c41\u0c17\u0c41 (Telugu)" },
+  { id: "punjabi", label: "\u0a2a\u0a70\u0a1c\u0a3e\u0a2c\u0a40 (Punjabi)" },
+  { id: "kannada", label: "\u0c95\u0ca8\u0ccd\u0ca8\u0ca1 (Kannada)" },
+];
+
+/* The full Python analysis engine — column detection, KPIs, time series,
+   customer/category aggregation, forecasting (numpy), and every
+   narrative/SQL/chat function. Runs inside Pyodide, entirely client-side. */
+const PY_ENGINE_SOURCE = `
+import json
+import re
+import warnings
+import numpy as np
+import pandas as pd
+
+# pandas/dateutil emits a UserWarning every time an explicit dayfirst=
+# value is passed for a slash-date format it could also read the other way
+# -- exactly what parse_date_col() does deliberately, on every analysis
+# pass. Harmless, but would spam the browser console on every re-render.
+warnings.filterwarnings("ignore", category=UserWarning, module="dateutil.*")
+
+# ============================================================================
+# NUMBER / DATE PARSING (handles currency symbols, commas, odd formats)
+# ============================================================================
+def to_number(v):
+    if v is None:
+        return float("nan")
+    if isinstance(v, (int, float)):
+        return float(v) if v == v else float("nan")  # NaN check
+    s = str(v).strip()
+    if s == "" or s == "-" or s.lower() in ("na", "n/a"):
+        return float("nan")
+    neg = s.startswith("(") and s.endswith(")")
+    if neg:
+        s = s[1:-1]
+    s = re.sub(r"[₹$€£¥,\\s]", "", s)
+    s = s.rstrip("%")
+    if s == "":
+        return float("nan")
+    try:
+        n = float(s)
+    except ValueError:
+        return float("nan")
+    return -n if neg else n
+
+
+DATE_PATTERNS = [
+    re.compile(r"^\\d{4}-\\d{1,2}-\\d{1,2}"),
+    re.compile(r"^\\d{1,2}[/\\-]\\d{1,2}[/\\-]\\d{2,4}$"),
+    re.compile(r"^\\d{1,2}\\s+[A-Za-z]{3,9}\\s+\\d{2,4}$"),
+    re.compile(r"^[A-Za-z]{3,9}\\s+\\d{4}$"),
+]
+
+def looks_like_date_value(v):
+    if v is None or isinstance(v, (int, float)):
+        return False
+    s = str(v).strip()
+    if not any(p.match(s) for p in DATE_PATTERNS):
+        return False
+    try:
+        pd.to_datetime(s)
+        return True
+    except Exception:
+        return False
+
+
+def fmt_money(n):
+    if n is None or (isinstance(n, float) and np.isnan(n)):
+        return "\\u2014"
+    sign = "-" if n < 0 else ""
+    a = abs(n)
+    if a >= 1e7: return f"{sign}{a/1e7:.2f}Cr"
+    if a >= 1e5: return f"{sign}{a/1e5:.2f}L"
+    if a >= 1e3: return f"{sign}{a/1e3:.1f}K"
+    return f"{sign}{round(a)}"
+
+def fmt_num(n):
+    if n is None or (isinstance(n, float) and np.isnan(n)):
+        return "\\u2014"
+    return f"{round(n):,}"
+
+
+SLASH_DATE_RE = re.compile(r"^(\\d{1,2})[/\\-](\\d{1,2})[/\\-]\\d{2,4}$")
+ISO_DATE_RE = re.compile(r"^\\d{4}-\\d{1,2}-\\d{1,2}")
+
+def _resolve_date_format(str_series):
+    """Numeric slash/dash dates like 05/03/2024 are genuinely ambiguous
+    between day-first (5 Mar) and month-first (3 May) reading. This app
+    defaults to day-first, matching the Indian date convention its
+    Hinglish-first UI targets -- but first scans the raw values for
+    unambiguous proof otherwise: if any value's first numeric group is >12,
+    it can only be a day (never a month), which confirms day-first; if
+    instead the *second* group is ever >12 with the first never >12, the
+    data is actually month-first (e.g. a report exported from a US tool).
+    Ties or no slash-dates at all keep the day-first default.
+
+    ISO dates (YYYY-MM-DD) are unambiguous and checked first and separately
+    -- pandas/dateutil has a real gotcha where passing dayfirst=True can
+    silently swap the month/day of an ISO string too (when it falls back to
+    the general parser instead of the ISO fast-path), so ISO-looking columns
+    always get dayfirst=False regardless of the slash-date heuristic above.
+    Returns (dayfirst, had_evidence, mode).
+    """
+    samples = str_series.dropna().astype(str).head(200)
+    if len(samples) == 0:
+        return True, False, "ambiguous"
+
+    iso_hits = sum(bool(ISO_DATE_RE.match(v.strip())) for v in samples)
+    if iso_hits >= 0.7 * len(samples):
+        return False, True, "iso"  # unambiguous ISO -- dayfirst must stay False
+
+    first_gt12 = second_gt12 = 0
+    for v in samples:
+        m = SLASH_DATE_RE.match(v.strip())
+        if not m:
+            continue
+        a, b = int(m.group(1)), int(m.group(2))
+        if a > 12:
+            first_gt12 += 1
+        if b > 12:
+            second_gt12 += 1
+    if second_gt12 > 0 and first_gt12 == 0:
+        return False, True, "slash-evidence"  # unambiguous month-first evidence
+    if first_gt12 > 0 and second_gt12 == 0:
+        return True, True, "slash-evidence"   # unambiguous day-first evidence
+    return True, False, "slash-default"        # ambiguous/no slash-dates -- day-first default
+
+
+def parse_date_col(series):
+    """Parses a raw date column with the day/month ambiguity (and the ISO
+    dayfirst gotcha) above resolved.
+    Returns (parsed_series, dayfirst_used, had_evidence, mode)."""
+    dayfirst, had_evidence, mode = _resolve_date_format(series)
+    parsed = pd.to_datetime(series, errors="coerce", dayfirst=dayfirst)
+    return parsed, dayfirst, had_evidence, mode
+
+
+def clean_str(v):
+    """Normalizes a grouping key: strips leading/trailing whitespace and
+    collapses internal repeated whitespace, so 'Alpha', 'Alpha ', and
+    '  Alpha' all group together. Case is preserved (branding may be
+    case-sensitive on purpose), only whitespace noise is fixed."""
+    if v is None:
+        return v
+    s = str(v)
+    return re.sub(r"\\s+", " ", s.strip())
+
+
+# ============================================================================
+# COLUMN DETECTION (value-based — works even with unfamiliar headers)
+# ============================================================================
+def _detect_columns(df: pd.DataFrame):
+    columns = list(df.columns)
+    numeric_cols, string_cols, date_cols = [], [], []
+
+    for col in columns:
+        sample = df[col].dropna().astype(object).head(30).tolist()
+        if not sample:
+            continue
+        date_hits = sum(looks_like_date_value(v) for v in sample)
+        num_hits = sum(not np.isnan(to_number(v)) for v in sample)
+        name_is_date = bool(re.search(r"date|month|period|day|year|time|dt$", col, re.I))
+        if name_is_date or date_hits >= 0.7 * len(sample):
+            date_cols.append(col)
+        elif num_hits >= 0.7 * len(sample):
+            numeric_cols.append(col)
+        else:
+            string_cols.append(col)
+
+    date_col = date_cols[0] if date_cols else None
+
+    id_like = re.compile(r"(^|_)(id|no|num|code)(s)?$|number$", re.I)
+    name_match_revenue = next((c for c in numeric_cols
+                                if re.search(r"revenue|sales|amount|amt|total|price|value|cost|income|earning|turnover", c, re.I)), None)
+    revenue_col = name_match_revenue
+    if revenue_col is None and numeric_cols:
+        candidates = [c for c in numeric_cols if not id_like.search(c)] or numeric_cols
+        sums = {c: df[c].map(to_number).abs().sum() for c in candidates}
+        revenue_col = max(sums, key=sums.get)
+
+    category_like = re.compile(r"region|status|type|category|segment|country|state|gender|channel|method", re.I)
+    name_match_customer = next((c for c in string_cols
+                                 if re.search(r"customer|client|account|company|buyer|vendor|user|name", c, re.I)), None)
+    customer_col = name_match_customer
+    if customer_col is None and string_cols:
+        scored = []
+        for c in string_cols:
+            vals = df[c].dropna().map(clean_str)
+            uniq = vals.nunique()
+            ratio = uniq / len(vals) if len(vals) else 0
+            is_cat = bool(category_like.search(c)) or uniq <= 4
+            is_free_text = ratio > 0.9 and len(vals) > 10
+            penalty = 1 if (is_cat or is_free_text) else 0
+            scored.append((c, uniq, penalty))
+        clean = [s for s in scored if s[2] == 0] or scored
+        clean.sort(key=lambda s: -s[1])
+        customer_col = clean[0][0]
+
+    return dict(columns=columns, numericCols=numeric_cols, stringCols=string_cols,
+                dateCol=date_col, revenueCol=revenue_col, customerCol=customer_col)
+
+
+def detect_columns(rows_json):
+    rows = json.loads(rows_json)
+    if not rows:
+        return json.dumps(dict(columns=[], numericCols=[], stringCols=[], dateCol=None, revenueCol=None, customerCol=None))
+    df = pd.DataFrame(rows)
+    return json.dumps(_detect_columns(df))
+
+
+# ============================================================================
+# KPIs / TIME SERIES / BREAKDOWNS  (all pandas — this is the "analysis" layer)
+# ============================================================================
+def compute_kpis(rows_json, revenue_col, customer_col, date_col):
+    rows = json.loads(rows_json)
+    revenue_col = json.loads(revenue_col)
+    customer_col = json.loads(customer_col)
+    date_col = json.loads(date_col)
+    df = pd.DataFrame(rows)
+    kpis = []
+    if not len(df):
+        return json.dumps(kpis)
+
+    if revenue_col:
+        vals = df[revenue_col].map(to_number)
+        total = vals.sum()
+        avg = vals.mean()
+        kpis.append(dict(label=f"Total {revenue_col}", value=fmt_money(total), raw=float(total), kind="money"))
+        kpis.append(dict(label=f"Avg {revenue_col} / row", value=fmt_money(avg), raw=float(avg), kind="money"))
+    kpis.append(dict(label="Total Records", value=fmt_num(len(df)), raw=len(df), kind="count"))
+    if customer_col:
+        uniq = df[customer_col].map(clean_str).nunique()
+        kpis.append(dict(label=f"Unique {customer_col}", value=fmt_num(uniq), raw=int(uniq), kind="count"))
+
+    growth = None
+    if revenue_col:
+        d = df.copy()
+        if date_col:
+            d["_d"], _, _, _ = parse_date_col(d[date_col])
+            d = d.sort_values("_d")
+        mid = len(d) // 2
+        first, second = d.iloc[:mid], d.iloc[mid:]
+        a = first[revenue_col].map(to_number).sum()
+        b = second[revenue_col].map(to_number).sum()
+        if a and a > 0:
+            growth = (b - a) / a * 100
+    if growth is not None:
+        kpis.append(dict(label="Period-over-period growth",
+                          value=f"{'+' if growth>=0 else ''}{growth:.1f}%", raw=float(growth), isDelta=True, kind="percent"))
+    return json.dumps(kpis)
+
+
+def build_time_series(rows_json, date_col, revenue_col):
+    rows = json.loads(rows_json)
+    date_col = json.loads(date_col)
+    revenue_col = json.loads(revenue_col)
+    if not date_col or not revenue_col or not rows:
+        return json.dumps([])
+    df = pd.DataFrame(rows)
+    d = df.copy()
+    d["_d"], _, _, _ = parse_date_col(d[date_col])
+    d = d.dropna(subset=["_d"])
+    d["_v"] = d[revenue_col].map(to_number)
+
+    # Downsample to weekly/monthly buckets when daily granularity would
+    # produce too many points for the chart to render smoothly.
+    daily_count = d["_d"].dt.date.nunique()
+    if daily_count > 120:
+        bucket = d["_d"].dt.to_period("M").dt.start_time  # monthly buckets
+    elif daily_count > 60:
+        bucket = d["_d"].dt.to_period("W").dt.start_time  # weekly buckets
+    else:
+        bucket = d["_d"].dt.date
+
+    ts = d.groupby(bucket)["_v"].sum().reset_index()
+    ts.columns = ["date", "value"]
+    ts["date"] = ts["date"].astype(str).str.slice(0, 10)
+    ts = ts.sort_values("date")
+    return json.dumps([{"date": r["date"], "value": float(r["value"])} for _, r in ts.iterrows()])
+
+
+def category_breakdown(rows_json, category_col, revenue_col):
+    rows = json.loads(rows_json)
+    category_col = json.loads(category_col)
+    revenue_col = json.loads(revenue_col)
+    if not category_col or not revenue_col or not rows:
+        return json.dumps([])
+    df = pd.DataFrame(rows)
+    df[category_col] = df[category_col].map(clean_str)
+    grp = df.groupby(category_col)[revenue_col].apply(lambda s: s.map(to_number).sum()).sort_values(ascending=False).head(6)
+    return json.dumps([{"name": str(k), "value": float(v)} for k, v in grp.items()])
+
+
+def customer_ranking(rows_json, customer_col, revenue_col):
+    rows = json.loads(rows_json)
+    customer_col = json.loads(customer_col)
+    revenue_col = json.loads(revenue_col)
+    if not customer_col or not revenue_col or not rows:
+        return json.dumps([])
+    df = pd.DataFrame(rows)
+    df[customer_col] = df[customer_col].map(clean_str)
+    grp = df.groupby(customer_col)[revenue_col].apply(lambda s: s.map(to_number).sum()).sort_values(ascending=False)
+    return json.dumps([{"name": str(k), "value": float(v)} for k, v in grp.items()])
+
+
+def customer_segments(ranking_json):
+    ranking = json.loads(ranking_json)
+    n = len(ranking)
+    if n == 0:
+        return json.dumps([])
+    high_cut = max(1, -(-n * 20 // 100))
+    med_cut = max(high_cut + 1, -(-n * 60 // 100))
+    seg = [
+        dict(name="High value (top 20%)", value=sum(c["value"] for c in ranking[:high_cut])),
+        dict(name="Mid value", value=sum(c["value"] for c in ranking[high_cut:med_cut])),
+        dict(name="Long tail", value=sum(c["value"] for c in ranking[med_cut:])),
+    ]
+    return json.dumps([s for s in seg if s["value"] > 0])
+
+
+# ============================================================================
+# FORECAST — pure numpy least-squares fit (real regression, no LLM, no scipy)
+# ============================================================================
+def run_forecast(timeseries_json, horizon):
+    ts = json.loads(timeseries_json)
+    horizon = json.loads(horizon)
+    n = len(ts)
+    if n < 3:
+        return json.dumps(dict(combined=[], slope=0, r2=0, model="none"))
+
+    y = np.array([p["value"] for p in ts], dtype=float)
+    x = np.arange(n, dtype=float)
+    dates = pd.to_datetime([p["date"] for p in ts])
+
+    def r2_of(y_actual, y_fit):
+        ss_res = np.sum((y_actual - y_fit) ** 2)
+        ss_tot = np.sum((y_actual - np.mean(y_actual)) ** 2)
+        return float(1 - ss_res / ss_tot) if ss_tot > 0 else 0.0
+
+    # Linear fit (always available)
+    lin_coef = np.polyfit(x, y, 1)
+    lin_fit = np.polyval(lin_coef, x)
+    lin_r2 = r2_of(y, lin_fit)
+
+    # Quadratic fit — only considered with enough points to avoid overfitting,
+    # and only adopted if it improves R2 by a meaningful margin.
+    use_quad = False
+    if n >= 8:
+        quad_coef = np.polyfit(x, y, 2)
+        quad_fit = np.polyval(quad_coef, x)
+        quad_r2 = r2_of(y, quad_fit)
+        if quad_r2 > lin_r2 + 0.05:
+            use_quad = True
+
+    if use_quad:
+        coef, fit, r2, model_name = quad_coef, quad_fit, quad_r2, "quadratic"
+    else:
+        coef, fit, r2, model_name = lin_coef, lin_fit, lin_r2, "linear"
+
+    residual_std = float(np.std(y - fit))
+
+    # Monthly seasonal index: average ratio of actual/trend per calendar
+    # month, applied multiplicatively to future predictions. Only attempted
+    # with at least a full year of history so the index is meaningful.
+    seasonal_index = {}
+    used_seasonality = False
+    if n >= 12:
+        safe_fit = np.where(fit == 0, 1e-9, fit)
+        ratio = y / safe_fit
+        months = dates.month.values
+        for m in range(1, 13):
+            vals = ratio[months == m]
+            if len(vals) > 0:
+                seasonal_index[m] = float(np.clip(np.mean(vals), 0.5, 1.5))
+        if len(seasonal_index) >= 6:
+            used_seasonality = True
+
+    future_x = np.arange(n, n + horizon, dtype=float)
+    future_trend = np.polyval(coef, future_x)
+    last_date = dates[-1]
+    future_dates = [last_date + pd.DateOffset(months=i + 1) for i in range(horizon)]
+
+    preds = []
+    for i in range(horizon):
+        base = future_trend[i]
+        if used_seasonality:
+            m = future_dates[i].month
+            base = base * seasonal_index.get(m, 1.0)
+        preds.append(max(0.0, float(base)))
+    preds = np.array(preds)
+
+    # ~90% prediction interval band from residual spread (widens slightly
+    # further out, since uncertainty compounds the further we project).
+    z = 1.645
+    lower = np.maximum(0, preds - z * residual_std * np.sqrt(1 + np.arange(1, horizon + 1) / n))
+    upper = preds + z * residual_std * np.sqrt(1 + np.arange(1, horizon + 1) / n)
+
+    combined = [{"date": ts[i]["date"], "actual": ts[i]["value"], "predicted": None,
+                 "predictedLow": None, "predictedHigh": None} for i in range(n)]
+    combined += [{"date": future_dates[i].strftime("%Y-%m-%d"), "actual": None,
+                  "predicted": float(preds[i]), "predictedLow": float(lower[i]), "predictedHigh": float(upper[i])}
+                 for i in range(horizon)]
+
+    slope_out = float(coef[-2]) if model_name == "linear" else float(2 * coef[0] * (n - 1) + coef[1])
+    return json.dumps(dict(
+        combined=combined, slope=slope_out, r2=float(r2), model=model_name,
+        seasonalityUsed=used_seasonality, residualStd=residual_std,
+    ))
+
+
+# ============================================================================
+# GROWTH BREAKDOWN — period-over-period % change table (pandas/numpy)
+# ============================================================================
+def growth_breakdown(timeseries_json):
+    ts = json.loads(timeseries_json)
+    out = []
+    for i, p in enumerate(ts):
+        if i == 0:
+            out.append(dict(date=p["date"], value=p["value"], changePct=None))
+        else:
+            prev = ts[i - 1]["value"]
+            change = ((p["value"] - prev) / prev * 100) if prev else None
+            out.append(dict(date=p["date"], value=p["value"], changePct=round(change, 1) if change is not None else None))
+    return json.dumps(out)
+
+
+# ============================================================================
+# CORRELATION MATRIX — between numeric columns (pandas)
+# ============================================================================
+def correlation_matrix(rows_json, numeric_cols_json):
+    rows = json.loads(rows_json)
+    numeric_cols = json.loads(numeric_cols_json)
+    if not rows or len(numeric_cols) < 2:
+        return json.dumps(dict(columns=[], matrix=[]))
+    df = pd.DataFrame(rows)
+    for c in numeric_cols:
+        df[c] = df[c].map(to_number)
+    corr = df[numeric_cols].corr()
+    corr = corr.fillna(0)
+    matrix = [[round(float(v), 2) for v in row] for row in corr.values]
+    return json.dumps(dict(columns=numeric_cols, matrix=matrix))
+LANGUAGES = {
+    "hinglish": "Hinglish (default)",
+    "hindi": "हिंदी (Hindi)",
+    "english": "English",
+    "marathi": "मराठी (Marathi)",
+    "gujarati": "ગુજરાતી (Gujarati)",
+    "bengali": "বাংলা (Bengali)",
+    "tamil": "தமிழ் (Tamil)",
+    "telugu": "తెలుగు (Telugu)",
+    "punjabi": "ਪੰਜਾਬੀ (Punjabi)",
+    "kannada": "ಕನ್ನಡ (Kannada)",
+}
+
+PHRASES = {
+    "hinglish": dict(
+        total="Aapka total {metric} {value} raha hai, {records} records ke aadhar par.",
+        growth_up="Growth trend positive hai — pichle period ke comparison mein {growth}% ka izafa dikh raha hai. Yeh accha sign hai.",
+        growth_down="Growth thoda neeche hai — pichle period ke comparison mein {growth}% ki giravat dikh rahi hai. Isko monitor karna zaroori hai.",
+        growth_flat="Growth roughly stable hai, koi bada upar-neeche change nahi dikh raha.",
+        top_driver="Sabse zyada contribution '{top}' se aa raha hai — {share}% total ka.",
+        concentration_high="Concentration thodi high hai — agar '{top}' kabhi slow ho jaye to overall number pe bada asar padega, isliye diversify karna sahi rahega.",
+        concentration_ok="Concentration healthy dikh rahi hai, kisi ek source pe zyada depend nahi kiya gaya.",
+        action="Suggestion: '{top}' jaise high-performing areas par focus badhao, aur weak segments ko regularly track karte raho.",
+        forecast_up="Trend line upar ki taraf ja rahi hai — agle {horizon} periods mein roughly {value} tak pahunchne ka andaza hai (R²={r2}, is line ka fit).",
+        forecast_down="Trend line neeche ki taraf ja rahi hai — agar yehi pattern continue hua to agle {horizon} periods mein roughly {value} tak girne ka andaza hai (R²={r2}).",
+        forecast_flat="Trend roughly flat hai — bada change expected nahi hai, agle periods mein numbers {value} ke aas-paas rehne ka andaza hai.",
+        forecast_confidence_low="Note: fit thoda weak hai (R²={r2}), matlab data mein kaafi ups-and-downs hain — is projection ko directional guide maano, exact number nahi.",
+        forecast_confidence_ok="Fit reasonably strong hai (R²={r2}), toh yeh projection ek decent directional estimate deta hai.",
+        forecast_risk="Risk: yeh sirf historical trend pe based hai — seasonality, naye competitors, ya market shifts is model mein account nahi hote.",
+        forecast_seasonal_note="Is forecast mein seasonal pattern bhi factor kiya gaya hai (jaise saal ke kuch mahine consistently upar ya neeche rehte hain).",
+    ),
+    "hindi": dict(
+        total="आपका कुल {metric} {value} रहा है, {records} रिकॉर्ड्स के आधार पर।",
+        growth_up="ग्रोथ ट्रेंड सकारात्मक है — पिछली अवधि की तुलना में {growth}% की वृद्धि दिख रही है। यह अच्छा संकेत है।",
+        growth_down="ग्रोथ थोड़ी कम हुई है — पिछली अवधि की तुलना में {growth}% की गिरावट दिख रही है। इस पर नज़र रखना ज़रूरी है।",
+        growth_flat="ग्रोथ लगभग स्थिर है, कोई बड़ा बदलाव नहीं दिख रहा।",
+        top_driver="सबसे ज़्यादा योगदान '{top}' से आ रहा है — कुल का {share}%।",
+        concentration_high="निर्भरता थोड़ी अधिक है — अगर '{top}' कभी धीमा पड़े तो कुल आंकड़े पर बड़ा असर पड़ सकता है, इसलिए विविधता लाना उचित रहेगा।",
+        concentration_ok="निर्भरता संतुलित दिख रही है, किसी एक स्रोत पर अत्यधिक निर्भरता नहीं है।",
+        action="सुझाव: '{top}' जैसे बेहतर प्रदर्शन वाले क्षेत्रों पर ध्यान बढ़ाएँ, और कमज़ोर हिस्सों पर नियमित नज़र रखें।",
+        forecast_up="ट्रेंड ऊपर की ओर जा रहा है — अगले {horizon} अवधियों में लगभग {value} तक पहुँचने का अनुमान है (R²={r2})।",
+        forecast_down="ट्रेंड नीचे की ओर जा रहा है — यदि यही पैटर्न जारी रहा तो अगले {horizon} अवधियों में लगभग {value} तक गिरावट का अनुमान है (R²={r2})।",
+        forecast_flat="ट्रेंड लगभग स्थिर है — बड़ा बदलाव अपेक्षित नहीं है, आंकड़े लगभग {value} के आसपास रहने का अनुमान है।",
+        forecast_confidence_low="नोट: फिट थोड़ा कमज़ोर है (R²={r2}), यानी डेटा में काफी उतार-चढ़ाव है — इसे एक दिशा-संकेत मानें, सटीक संख्या नहीं।",
+        forecast_confidence_ok="फिट अच्छा है (R²={r2}), इसलिए यह अनुमान एक ठोस दिशा-संकेत देता है।",
+        forecast_risk="जोखिम: यह अनुमान केवल ऐतिहासिक ट्रेंड पर आधारित है — मौसमी बदलाव, नए प्रतिस्पर्धी या बाज़ार में बदलाव इस मॉडल में शामिल नहीं हैं।",
+        forecast_seasonal_note="इस पूर्वानुमान में मौसमी पैटर्न को भी शामिल किया गया है (जैसे साल के कुछ महीने लगातार ऊपर या नीचे रहते हैं)।",
+    ),
+    "english": dict(
+        total="Your total {metric} stands at {value}, based on {records} records.",
+        growth_up="The growth trend is positive — up {growth}% compared to the previous period. That's a good sign.",
+        growth_down="Growth has slipped — down {growth}% compared to the previous period. Worth keeping an eye on.",
+        growth_flat="Growth is roughly flat, no major swing either way.",
+        top_driver="The biggest contributor is '{top}' — {share}% of the total.",
+        concentration_high="Concentration is on the higher side — if '{top}' slows down, it would meaningfully hit the overall number, so diversifying makes sense.",
+        concentration_ok="Concentration looks healthy — you're not overly dependent on a single source.",
+        action="Suggestion: lean further into high performers like '{top}', while keeping a regular eye on the weaker segments.",
+        forecast_up="The trend line is heading upward — projected to reach roughly {value} over the next {horizon} periods (R²={r2}).",
+        forecast_down="The trend line is heading downward — if this pattern continues, expect a drop to roughly {value} over the next {horizon} periods (R²={r2}).",
+        forecast_flat="The trend is roughly flat — no major change expected, numbers should stay near {value}.",
+        forecast_confidence_low="Note: the fit is fairly weak (R²={r2}), meaning the data is noisy — treat this as a directional guide, not an exact figure.",
+        forecast_confidence_ok="The fit is reasonably strong (R²={r2}), so this projection is a decent directional estimate.",
+        forecast_risk="Risk: this is based purely on the historical trend — seasonality, new competitors, or market shifts aren't captured by this model.",
+        forecast_seasonal_note="This forecast also accounts for a seasonal pattern (certain months consistently running higher or lower).",
+    ),
+    "marathi": dict(
+        total="तुमचा एकूण {metric} {value} इतका आहे, {records} नोंदींच्या आधारे.",
+        growth_up="ग्रोथ ट्रेंड सकारात्मक आहे — मागील कालावधीच्या तुलनेत {growth}% वाढ दिसत आहे. हे चांगले लक्षण आहे.",
+        growth_down="ग्रोथ थोडी कमी झाली आहे — मागील कालावधीच्या तुलनेत {growth}% घट दिसत आहे. यावर लक्ष ठेवणे गरजेचे आहे.",
+        growth_flat="ग्रोथ साधारण स्थिर आहे, मोठा बदल दिसत नाही.",
+        top_driver="सर्वाधिक योगदान '{top}' कडून येत आहे — एकूणाच्या {share}%.",
+        concentration_high="अवलंबित्व थोडे जास्त आहे — '{top}' मंदावले तर एकूण आकड्यावर मोठा परिणाम होईल, त्यामुळे विविधता आणणे योग्य ठरेल.",
+        concentration_ok="अवलंबित्व संतुलित दिसत आहे, एकाच स्रोतावर जास्त भर नाही.",
+        action="सूचना: '{top}' सारख्या चांगली कामगिरी करणाऱ्या भागांवर अधिक लक्ष द्या, आणि कमकुवत विभागांवर नियमित लक्ष ठेवा.",
+        forecast_up="ट्रेंड वरच्या दिशेने जात आहे — पुढील {horizon} कालावधीत अंदाजे {value} पर्यंत पोहोचण्याचा अंदाज आहे (R²={r2}).",
+        forecast_down="ट्रेंड खालच्या दिशेने जात आहे — हाच पॅटर्न सुरू राहिल्यास पुढील {horizon} कालावधीत अंदाजे {value} पर्यंत घट होण्याचा अंदाज आहे (R²={r2}).",
+        forecast_flat="ट्रेंड साधारण स्थिर आहे — मोठा बदल अपेक्षित नाही, आकडे {value} च्या आसपास राहण्याचा अंदाज आहे.",
+        forecast_confidence_low="टीप: फिट थोडा कमकुवत आहे (R²={r2}), म्हणजे डेटामध्ये चढ-उतार जास्त आहेत — हा फक्त दिशादर्शक अंदाज समजा.",
+        forecast_confidence_ok="फिट चांगला आहे (R²={r2}), त्यामुळे हा अंदाज एक ठोस दिशादर्शक अंदाज देतो.",
+        forecast_risk="जोखीम: हा अंदाज फक्त ऐतिहासिक ट्रेंडवर आधारित आहे — हंगामी बदल, नवीन स्पर्धक किंवा बाजारातील बदल या मॉडेलमध्ये समाविष्ट नाहीत.",
+        forecast_seasonal_note="या अंदाजात हंगामी नमुना देखील विचारात घेतला आहे (वर्षातील काही महिने सातत्याने जास्त किंवा कमी असतात).",
+    ),
+    "gujarati": dict(
+        total="તમારો કુલ {metric} {value} છે, {records} રેકોર્ડ્સના આધારે.",
+        growth_up="ગ્રોથ ટ્રેન્ડ સકારાત્મક છે — પાછલા સમયગાળાની સરખામણીમાં {growth}% વધારો દેખાય છે. આ સારો સંકેત છે.",
+        growth_down="ગ્રોથ થોડો ઘટ્યો છે — પાછલા સમયગાળાની સરખામણીમાં {growth}% ઘટાડો દેખાય છે. તેના પર નજર રાખવી જરૂરી છે.",
+        growth_flat="ગ્રોથ લગભગ સ્થિર છે, મોટો ફેરફાર દેખાતો નથી.",
+        top_driver="સૌથી વધુ યોગદાન '{top}' તરફથી આવે છે — કુલના {share}%.",
+        concentration_high="નિર્ભરતા થોડી વધારે છે — જો '{top}' ધીમું પડે તો કુલ આંકડા પર મોટી અસર થશે, તેથી વૈવિધ્ય લાવવું યોગ્ય રહેશે.",
+        concentration_ok="નિર્ભરતા સંતુલિત દેખાય છે, એક જ સ્ત્રોત પર વધુ પડતો આધાર નથી.",
+        action="સૂચન: '{top}' જેવા સારો દેખાવ કરતા વિસ્તારો પર વધુ ધ્યાન આપો, અને નબળા વિભાગો પર નિયમિત નજર રાખો.",
+        forecast_up="ટ્રેન્ડ ઉપરની તરફ જઈ રહ્યો છે — આગામી {horizon} સમયગાળામાં અંદાજે {value} સુધી પહોંચવાનો અંદાજ છે (R²={r2}).",
+        forecast_down="ટ્રેન્ડ નીચેની તરફ જઈ રહ્યો છે — જો આ પેટર્ન ચાલુ રહે તો આગામી {horizon} સમયગાળામાં અંદાજે {value} સુધી ઘટાડાનો અંદાજ છે (R²={r2}).",
+        forecast_flat="ટ્રેન્ડ લગભગ સ્થિર છે — મોટો ફેરફાર અપેક્ષિત નથી, આંકડા {value} ની આસપાસ રહેવાનો અંદાજ છે.",
+        forecast_confidence_low="નોંધ: ફિટ થોડું નબળું છે (R²={r2}), એટલે ડેટામાં ઘણા ચડાવ-ઉતાર છે — આને ફક્ત દિશા-સૂચક અંદાજ ગણો.",
+        forecast_confidence_ok="ફિટ સારું છે (R²={r2}), તેથી આ અંદાજ એક નક્કર દિશા-સૂચક અંદાજ આપે છે.",
+        forecast_risk="જોખમ: આ અંદાજ ફક્ત ઐતિહાસિક ટ્રેન્ડ પર આધારિત છે — મોસમી ફેરફારો, નવા સ્પર્ધકો કે બજારના ફેરફારો આ મોડેલમાં સામેલ નથી.",
+        forecast_seasonal_note="આ અંદાજમાં મોસમી પેટર્નને પણ ધ્યાનમાં લેવામાં આવી છે (વર્ષના અમુક મહિના સતત વધારે કે ઓછા રહે છે).",
+    ),
+    "bengali": dict(
+        total="আপনার মোট {metric} {value}, {records}টি রেকর্ডের ভিত্তিতে।",
+        growth_up="গ্রোথ ট্রেন্ড ইতিবাচক — আগের সময়ের তুলনায় {growth}% বৃদ্ধি দেখা যাচ্ছে। এটি ভালো লক্ষণ।",
+        growth_down="গ্রোথ কিছুটা কমেছে — আগের সময়ের তুলনায় {growth}% হ্রাস দেখা যাচ্ছে। এটির উপর নজর রাখা দরকার।",
+        growth_flat="গ্রোথ মোটামুটি স্থিতিশীল, বড় কোনো পরিবর্তন দেখা যাচ্ছে না।",
+        top_driver="সবচেয়ে বেশি অবদান আসছে '{top}' থেকে — মোটের {share}%।",
+        concentration_high="নির্ভরতা কিছুটা বেশি — '{top}' কখনো ধীর হয়ে গেলে সামগ্রিক সংখ্যায় বড় প্রভাব পড়বে, তাই বৈচিত্র্য আনা উচিত।",
+        concentration_ok="নির্ভরতা ভারসাম্যপূর্ণ দেখাচ্ছে, একটি মাত্র উৎসের উপর অতিরিক্ত নির্ভরতা নেই।",
+        action="পরামর্শ: '{top}' এর মতো ভালো পারফর্মিং জায়গায় আরও মনোযোগ দিন, এবং দুর্বল অংশগুলো নিয়মিত পর্যবেক্ষণ করুন।",
+        forecast_up="ট্রেন্ড উপরের দিকে যাচ্ছে — পরবর্তী {horizon} সময়কালে আনুমানিক {value} পর্যন্ত পৌঁছানোর সম্ভাবনা (R²={r2})।",
+        forecast_down="ট্রেন্ড নিচের দিকে যাচ্ছে — এই প্যাটার্ন চলতে থাকলে পরবর্তী {horizon} সময়কালে আনুমানিক {value} পর্যন্ত কমতে পারে (R²={r2})।",
+        forecast_flat="ট্রেন্ড মোটামুটি স্থিতিশীল — বড় পরিবর্তনের সম্ভাবনা নেই, সংখ্যা {value} এর কাছাকাছি থাকতে পারে।",
+        forecast_confidence_low="নোট: ফিট কিছুটা দুর্বল (R²={r2}), অর্থাৎ ডেটায় বেশ ওঠানামা আছে — এটিকে দিকনির্দেশক অনুমান হিসেবে ধরুন, নির্দিষ্ট সংখ্যা নয়।",
+        forecast_confidence_ok="ফিট মোটামুটি শক্তিশালী (R²={r2}), তাই এই পূর্বাভাস একটি ভালো দিকনির্দেশক অনুমান দেয়।",
+        forecast_risk="ঝুঁকি: এই পূর্বাভাস শুধুমাত্র ঐতিহাসিক ট্রেন্ডের উপর ভিত্তি করে — ঋতুগত পরিবর্তন, নতুন প্রতিযোগী বা বাজারের পরিবর্তন এই মডেলে অন্তর্ভুক্ত নয়।",
+        forecast_seasonal_note="এই পূর্বাভাসে মৌসুমী প্যাটার্নও বিবেচনা করা হয়েছে (বছরের কিছু মাস ধারাবাহিকভাবে বেশি বা কম থাকে)।",
+    ),
+    "tamil": dict(
+        total="உங்கள் மொத்த {metric} {value} ஆக உள்ளது, {records} பதிவுகளின் அடிப்படையில்.",
+        growth_up="வளர்ச்சி போக்கு நேர்மறையாக உள்ளது — முந்தைய காலகட்டத்துடன் ஒப்பிடும்போது {growth}% அதிகரிப்பு தெரிகிறது. இது நல்ல அறிகுறி.",
+        growth_down="வளர்ச்சி சற்று குறைந்துள்ளது — முந்தைய காலகட்டத்துடன் ஒப்பிடும்போது {growth}% குறைவு தெரிகிறது. இதை கவனிக்க வேண்டும்.",
+        growth_flat="வளர்ச்சி பெரும்பாலும் நிலையானதாக உள்ளது, பெரிய மாற்றம் இல்லை.",
+        top_driver="அதிக பங்களிப்பு '{top}' இலிருந்து வருகிறது — மொத்தத்தில் {share}%.",
+        concentration_high="சார்பு சற்று அதிகமாக உள்ளது — '{top}' குறையும் பட்சத்தில் மொத்த எண்ணிக்கையில் பெரிய தாக்கம் ஏற்படும், எனவே பல்வகைப்படுத்துவது நல்லது.",
+        concentration_ok="சார்பு சமநிலையாக தெரிகிறது, ஒரே ஆதாரத்தை மட்டும் அதிகம் நம்பவில்லை.",
+        action="பரிந்துரை: '{top}' போன்ற சிறப்பாக செயல்படும் பகுதிகளில் கவனம் செலுத்துங்கள், பலவீனமான பகுதிகளை தொடர்ந்து கண்காணியுங்கள்.",
+        forecast_up="போக்கு மேல்நோக்கி செல்கிறது — அடுத்த {horizon} காலகட்டங்களில் ஏறத்தாழ {value} வரை சென்றடையும் என எதிர்பார்க்கப்படுகிறது (R²={r2}).",
+        forecast_down="போக்கு கீழ்நோக்கி செல்கிறது — இதே போக்கு தொடர்ந்தால் அடுத்த {horizon} காலகட்டங்களில் ஏறத்தாழ {value} வரை குறையும் என எதிர்பார்க்கப்படுகிறது (R²={r2}).",
+        forecast_flat="போக்கு பெரும்பாலும் நிலையானது — பெரிய மாற்றம் எதிர்பார்க்கப்படவில்லை, எண்கள் {value} அருகில் இருக்கும்.",
+        forecast_confidence_low="குறிப்பு: பொருத்தம் சற்று பலவீனமாக உள்ளது (R²={r2}), அதாவது தரவில் ஏற்ற இறக்கங்கள் அதிகம் — இதை ஒரு திசை மதிப்பீடாக மட்டும் கருதவும்.",
+        forecast_confidence_ok="பொருத்தம் நன்றாக உள்ளது (R²={r2}), எனவே இந்த மதிப்பீடு ஒரு நல்ல திசை மதிப்பீட்டை தருகிறது.",
+        forecast_risk="ஆபத்து: இந்த மதிப்பீடு வரலாற்று போக்கை மட்டுமே அடிப்படையாகக் கொண்டது — பருவகால மாற்றங்கள், புதிய போட்டியாளர்கள் அல்லது சந்தை மாற்றங்கள் இந்த மாதிரியில் இல்லை.",
+        forecast_seasonal_note="இந்த மதிப்பீடு பருவகால முறையையும் கணக்கில் எடுத்துக்கொள்கிறது (ஆண்டின் சில மாதங்கள் தொடர்ந்து அதிகமாகவோ குறைவாகவோ இருக்கும்).",
+    ),
+    "telugu": dict(
+        total="మీ మొత్తం {metric} {value} గా ఉంది, {records} రికార్డుల ఆధారంగా.",
+        growth_up="వృద్ధి ధోరణి సానుకూలంగా ఉంది — గత కాలంతో పోలిస్తే {growth}% పెరుగుదల కనిపిస్తోంది. ఇది మంచి సంకేతం.",
+        growth_down="వృద్ధి కొంచెం తగ్గింది — గత కాలంతో పోలిస్తే {growth}% తగ్గుదల కనిపిస్తోంది. దీనిని గమనించడం అవసరం.",
+        growth_flat="వృద్ధి దాదాపు స్థిరంగా ఉంది, పెద్ద మార్పు కనిపించడం లేదు.",
+        top_driver="అత్యధిక సహకారం '{top}' నుండి వస్తోంది — మొత్తంలో {share}%.",
+        concentration_high="ఆధారపడటం కొంచెం ఎక్కువగా ఉంది — '{top}' మందగిస్తే మొత్తం సంఖ్యపై పెద్ద ప్రభావం పడుతుంది, కాబట్టి వైవిధ్యం తేవడం మంచిది.",
+        concentration_ok="ఆధారపడటం సమతుల్యంగా కనిపిస్తోంది, ఒకే మూలంపై అధికంగా ఆధారపడలేదు.",
+        action="సూచన: '{top}' వంటి బాగా పనిచేస్తున్న ప్రాంతాలపై మరింత దృష్టి పెట్టండి, బలహీన విభాగాలను క్రమం తప్పకుండా పర్యవేక్షించండి.",
+        forecast_up="ధోరణి పైకి వెళుతోంది — తదుపరి {horizon} కాలాల్లో సుమారు {value} వరకు చేరుకుంటుందని అంచనా (R²={r2}).",
+        forecast_down="ధోరణి కిందికి వెళుతోంది — ఇదే విధానం కొనసాగితే తదుపరి {horizon} కాలాల్లో సుమారు {value} వరకు తగ్గుతుందని అంచనా (R²={r2}).",
+        forecast_flat="ధోరణి దాదాపు స్థిరంగా ఉంది — పెద్ద మార్పు ఆశించబడదు, సంఖ్యలు {value} చుట్టూ ఉండొచ్చు.",
+        forecast_confidence_low="గమనిక: ఫిట్ కొంచెం బలహీనంగా ఉంది (R²={r2}), అంటే డేటాలో హెచ్చుతగ్గులు ఎక్కువ — దీన్ని దిశ సూచనగా మాత్రమే భావించండి.",
+        forecast_confidence_ok="ఫిట్ బాగానే ఉంది (R²={r2}), కాబట్టి ఈ అంచనా మంచి దిశ సూచనను ఇస్తుంది.",
+        forecast_risk="రిస్క్: ఈ అంచనా కేవలం చారిత్రక ధోరణిపై ఆధారపడింది — సీజనల్ మార్పులు, కొత్త పోటీదారులు లేదా మార్కెట్ మార్పులు ఈ మోడల్‌లో లేవు.",
+        forecast_seasonal_note="ఈ అంచనా కాలానుగుణ నమూనాను కూడా పరిగణనలోకి తీసుకుంటుంది (సంవత్సరంలో కొన్ని నెలలు స్థిరంగా ఎక్కువ లేదా తక్కువగా ఉంటాయి).",
+    ),
+    "punjabi": dict(
+        total="ਤੁਹਾਡਾ ਕੁੱਲ {metric} {value} ਹੈ, {records} ਰਿਕਾਰਡਾਂ ਦੇ ਆਧਾਰ 'ਤੇ।",
+        growth_up="ਗ੍ਰੋਥ ਟ੍ਰੈਂਡ ਸਕਾਰਾਤਮਕ ਹੈ — ਪਿਛਲੇ ਸਮੇਂ ਦੇ ਮੁਕਾਬਲੇ {growth}% ਵਾਧਾ ਦਿਖ ਰਿਹਾ ਹੈ। ਇਹ ਚੰਗਾ ਸੰਕੇਤ ਹੈ।",
+        growth_down="ਗ੍ਰੋਥ ਥੋੜ੍ਹੀ ਘਟੀ ਹੈ — ਪਿਛਲੇ ਸਮੇਂ ਦੇ ਮੁਕਾਬਲੇ {growth}% ਗਿਰਾਵਟ ਦਿਖ ਰਹੀ ਹੈ। ਇਸ 'ਤੇ ਨਜ਼ਰ ਰੱਖਣੀ ਜ਼ਰੂਰੀ ਹੈ।",
+        growth_flat="ਗ੍ਰੋਥ ਲਗਭਗ ਸਥਿਰ ਹੈ, ਕੋਈ ਵੱਡਾ ਬਦਲਾਅ ਨਹੀਂ ਦਿਖ ਰਿਹਾ।",
+        top_driver="ਸਭ ਤੋਂ ਵੱਧ ਯੋਗਦਾਨ '{top}' ਤੋਂ ਆ ਰਿਹਾ ਹੈ — ਕੁੱਲ ਦਾ {share}%।",
+        concentration_high="ਨਿਰਭਰਤਾ ਥੋੜ੍ਹੀ ਵੱਧ ਹੈ — ਜੇ '{top}' ਕਦੇ ਹੌਲੀ ਹੋ ਜਾਵੇ ਤਾਂ ਕੁੱਲ ਅੰਕੜੇ 'ਤੇ ਵੱਡਾ ਅਸਰ ਪਵੇਗਾ, ਇਸ ਲਈ ਵਿਭਿੰਨਤਾ ਲਿਆਉਣੀ ਠੀਕ ਰਹੇਗੀ।",
+        concentration_ok="ਨਿਰਭਰਤਾ ਸੰਤੁਲਿਤ ਦਿਖ ਰਹੀ ਹੈ, ਕਿਸੇ ਇੱਕ ਸਰੋਤ 'ਤੇ ਜ਼ਿਆਦਾ ਨਿਰਭਰ ਨਹੀਂ ਹੈ।",
+        action="ਸੁਝਾਅ: '{top}' ਵਰਗੇ ਵਧੀਆ ਪ੍ਰਦਰਸ਼ਨ ਵਾਲੇ ਖੇਤਰਾਂ 'ਤੇ ਧਿਆਨ ਵਧਾਓ, ਅਤੇ ਕਮਜ਼ੋਰ ਹਿੱਸਿਆਂ 'ਤੇ ਨਿਯਮਿਤ ਨਜ਼ਰ ਰੱਖੋ।",
+        forecast_up="ਟ੍ਰੈਂਡ ਉੱਪਰ ਵੱਲ ਜਾ ਰਿਹਾ ਹੈ — ਅਗਲੇ {horizon} ਸਮਿਆਂ ਵਿੱਚ ਲਗਭਗ {value} ਤੱਕ ਪਹੁੰਚਣ ਦਾ ਅਨੁਮਾਨ ਹੈ (R²={r2})।",
+        forecast_down="ਟ੍ਰੈਂਡ ਹੇਠਾਂ ਵੱਲ ਜਾ ਰਿਹਾ ਹੈ — ਜੇ ਇਹੀ ਪੈਟਰਨ ਜਾਰੀ ਰਿਹਾ ਤਾਂ ਅਗਲੇ {horizon} ਸਮਿਆਂ ਵਿੱਚ ਲਗਭਗ {value} ਤੱਕ ਗਿਰਾਵਟ ਦਾ ਅਨੁਮਾਨ ਹੈ (R²={r2})।",
+        forecast_flat="ਟ੍ਰੈਂਡ ਲਗਭਗ ਸਥਿਰ ਹੈ — ਵੱਡਾ ਬਦਲਾਅ ਉਮੀਦ ਨਹੀਂ ਹੈ, ਅੰਕੜੇ {value} ਦੇ ਆਸ-ਪਾਸ ਰਹਿਣ ਦਾ ਅਨੁਮਾਨ ਹੈ।",
+        forecast_confidence_low="ਨੋਟ: ਫਿੱਟ ਥੋੜ੍ਹਾ ਕਮਜ਼ੋਰ ਹੈ (R²={r2}), ਮਤਲਬ ਡਾਟੇ ਵਿੱਚ ਕਾਫ਼ੀ ਉਤਾਰ-ਚੜ੍ਹਾਅ ਹਨ — ਇਸਨੂੰ ਸਿਰਫ਼ ਦਿਸ਼ਾ-ਸੰਕੇਤ ਮੰਨੋ।",
+        forecast_confidence_ok="ਫਿੱਟ ਵਧੀਆ ਹੈ (R²={r2}), ਇਸ ਲਈ ਇਹ ਅਨੁਮਾਨ ਇੱਕ ਠੋਸ ਦਿਸ਼ਾ-ਸੰਕੇਤ ਦਿੰਦਾ ਹੈ।",
+        forecast_risk="ਖ਼ਤਰਾ: ਇਹ ਅਨੁਮਾਨ ਸਿਰਫ਼ ਇਤਿਹਾਸਕ ਟ੍ਰੈਂਡ 'ਤੇ ਆਧਾਰਿਤ ਹੈ — ਮੌਸਮੀ ਬਦਲਾਅ, ਨਵੇਂ ਮੁਕਾਬਲੇਬਾਜ਼ ਜਾਂ ਬਾਜ਼ਾਰ ਬਦਲਾਅ ਇਸ ਮਾਡਲ ਵਿੱਚ ਸ਼ਾਮਲ ਨਹੀਂ ਹਨ।",
+        forecast_seasonal_note="ਇਸ ਅਨੁਮਾਨ ਵਿੱਚ ਮੌਸਮੀ ਪੈਟਰਨ ਨੂੰ ਵੀ ਸ਼ਾਮਲ ਕੀਤਾ ਗਿਆ ਹੈ (ਸਾਲ ਦੇ ਕੁਝ ਮਹੀਨੇ ਲਗਾਤਾਰ ਵੱਧ ਜਾਂ ਘੱਟ ਰਹਿੰਦੇ ਹਨ)।",
+    ),
+    "kannada": dict(
+        total="ನಿಮ್ಮ ಒಟ್ಟು {metric} {value} ಆಗಿದೆ, {records} ದಾಖಲೆಗಳ ಆಧಾರದ ಮೇಲೆ.",
+        growth_up="ಬೆಳವಣಿಗೆಯ ಪ್ರವೃತ್ತಿ ಧನಾತ್ಮಕವಾಗಿದೆ — ಹಿಂದಿನ ಅವಧಿಗೆ ಹೋಲಿಸಿದರೆ {growth}% ಹೆಚ್ಚಳ ಕಂಡುಬರುತ್ತಿದೆ. ಇದು ಒಳ್ಳೆಯ ಸಂಕೇತ.",
+        growth_down="ಬೆಳವಣಿಗೆ ಸ್ವಲ್ಪ ಕಡಿಮೆಯಾಗಿದೆ — ಹಿಂದಿನ ಅವಧಿಗೆ ಹೋಲಿಸಿದರೆ {growth}% ಇಳಿಕೆ ಕಂಡುಬರುತ್ತಿದೆ. ಇದನ್ನು ಗಮನಿಸುವುದು ಅಗತ್ಯ.",
+        growth_flat="ಬೆಳವಣಿಗೆ ಬಹುತೇಕ ಸ್ಥಿರವಾಗಿದೆ, ದೊಡ್ಡ ಬದಲಾವಣೆ ಕಾಣುತ್ತಿಲ್ಲ.",
+        top_driver="ಅತಿ ಹೆಚ್ಚು ಕೊಡುಗೆ '{top}' ನಿಂದ ಬರುತ್ತಿದೆ — ಒಟ್ಟಿನ {share}%.",
+        concentration_high="ಅವಲಂಬನೆ ಸ್ವಲ್ಪ ಹೆಚ್ಚಾಗಿದೆ — '{top}' ನಿಧಾನವಾದರೆ ಒಟ್ಟು ಸಂಖ್ಯೆಯ ಮೇಲೆ ದೊಡ್ಡ ಪರಿಣಾಮ ಬೀರುತ್ತದೆ, ಆದ್ದರಿಂದ ವೈವಿಧ್ಯತೆ ತರುವುದು ಒಳ್ಳೆಯದು.",
+        concentration_ok="ಅವಲಂಬನೆ ಸಮತೋಲಿತವಾಗಿ ಕಾಣುತ್ತಿದೆ, ಒಂದೇ ಮೂಲದ ಮೇಲೆ ಹೆಚ್ಚು ಅವಲಂಬಿತವಾಗಿಲ್ಲ.",
+        action="ಸಲಹೆ: '{top}' ನಂತಹ ಉತ್ತಮ ಸಾಧನೆ ಮಾಡುತ್ತಿರುವ ಕ್ಷೇತ್ರಗಳ ಮೇಲೆ ಗಮನ ಹೆಚ್ಚಿಸಿ, ಮತ್ತು ದುರ್ಬಲ ವಿಭಾಗಗಳನ್ನು ನಿಯಮಿತವಾಗಿ ಗಮನಿಸಿ.",
+        forecast_up="ಪ್ರವೃತ್ತಿ ಮೇಲ್ಮುಖವಾಗಿ ಸಾಗುತ್ತಿದೆ — ಮುಂದಿನ {horizon} ಅವಧಿಗಳಲ್ಲಿ ಸುಮಾರು {value} ತಲುಪುವ ನಿರೀಕ್ಷೆಯಿದೆ (R²={r2}).",
+        forecast_down="ಪ್ರವೃತ್ತಿ ಕೆಳಮುಖವಾಗಿ ಸಾಗುತ್ತಿದೆ — ಇದೇ ಮಾದರಿ ಮುಂದುವರೆದರೆ ಮುಂದಿನ {horizon} ಅವಧಿಗಳಲ್ಲಿ ಸುಮಾರು {value} ಗೆ ಇಳಿಯುವ ನಿರೀಕ್ಷೆಯಿದೆ (R²={r2}).",
+        forecast_flat="ಪ್ರವೃತ್ತಿ ಬಹುತೇಕ ಸ್ಥಿರವಾಗಿದೆ — ದೊಡ್ಡ ಬದಲಾವಣೆ ನಿರೀಕ್ಷಿಸಲಾಗಿಲ್ಲ, ಸಂಖ್ಯೆಗಳು {value} ಸುತ್ತ ಇರಬಹುದು.",
+        forecast_confidence_low="ಗಮನಿಸಿ: ಫಿಟ್ ಸ್ವಲ್ಪ ದುರ್ಬಲವಾಗಿದೆ (R²={r2}), ಅಂದರೆ ಡೇಟಾದಲ್ಲಿ ಏರಿಳಿತಗಳು ಹೆಚ್ಚಿವೆ — ಇದನ್ನು ದಿಕ್ಕಿನ ಸೂಚನೆಯಾಗಿ ಮಾತ್ರ ಪರಿಗಣಿಸಿ.",
+        forecast_confidence_ok="ಫಿಟ್ ಉತ್ತಮವಾಗಿದೆ (R²={r2}), ಆದ್ದರಿಂದ ಈ ಅಂದಾಜು ಉತ್ತಮ ದಿಕ್ಕಿನ ಸೂಚನೆ ನೀಡುತ್ತದೆ.",
+        forecast_risk="ಅಪಾಯ: ಈ ಅಂದಾಜು ಕೇವಲ ಐತಿಹಾಸಿಕ ಪ್ರವೃತ್ತಿಯ ಆಧಾರದ ಮೇಲಿದೆ — ಋತುಮಾನದ ಬದಲಾವಣೆಗಳು, ಹೊಸ ಸ್ಪರ್ಧಿಗಳು ಅಥವಾ ಮಾರುಕಟ್ಟೆ ಬದಲಾವಣೆಗಳು ಈ ಮಾದರಿಯಲ್ಲಿ ಸೇರಿಲ್ಲ.",
+        forecast_seasonal_note="ಈ ಅಂದಾಜು ಋತುಮಾನದ ಮಾದರಿಯನ್ನೂ ಪರಿಗಣಿಸುತ್ತದೆ (ವರ್ಷದ ಕೆಲವು ತಿಂಗಳುಗಳು ಸ್ಥಿರವಾಗಿ ಹೆಚ್ಚು ಅಥವಾ ಕಡಿಮೆ ಇರುತ್ತವೆ).",
+    ),
+}
+
+
+# ============================================================================
+# NARRATIVE GENERATION — rule-based, multi-language, no LLM
+# ============================================================================
+def build_insight_narrative(lang, kpis_json, category_json, revenue_col):
+    lang = json.loads(lang)
+    kpis = json.loads(kpis_json)
+    category_breakdown_ = json.loads(category_json)
+    revenue_col = json.loads(revenue_col)
+    p = PHRASES.get(lang, PHRASES["hinglish"])
+    parts = []
+
+    total_kpi = next((k for k in kpis if k["label"].startswith("Total")), None)
+    records_kpi = next((k for k in kpis if k["label"] == "Total Records"), None)
+    growth_kpi = next((k for k in kpis if k.get("isDelta")), None)
+
+    if total_kpi and records_kpi:
+        parts.append(p["total"].format(metric=revenue_col or "value", value=total_kpi["value"], records=records_kpi["value"]))
+
+    if growth_kpi is not None:
+        g = growth_kpi["raw"]
+        if g > 3:
+            parts.append(p["growth_up"].format(growth=f"{g:.1f}"))
+        elif g < -3:
+            parts.append(p["growth_down"].format(growth=f"{abs(g):.1f}"))
+        else:
+            parts.append(p["growth_flat"])
+
+    if category_breakdown_:
+        top = category_breakdown_[0]
+        total_cat = sum(c["value"] for c in category_breakdown_)
+        share = (top["value"] / total_cat * 100) if total_cat else 0
+        parts.append(p["top_driver"].format(top=top["name"], share=f"{share:.0f}"))
+        if share > 40:
+            parts.append(p["concentration_high"].format(top=top["name"]))
+        else:
+            parts.append(p["concentration_ok"])
+        parts.append(p["action"].format(top=top["name"]))
+
+    return json.dumps(" ".join(parts))
+
+
+def build_forecast_narrative(lang, forecast_json, horizon):
+    lang = json.loads(lang)
+    forecast_result = json.loads(forecast_json)
+    horizon = json.loads(horizon)
+    p = PHRASES.get(lang, PHRASES["hinglish"])
+    combined = forecast_result["combined"]
+    if not combined:
+        return json.dumps("")
+    slope = forecast_result["slope"]
+    r2 = forecast_result["r2"]
+    future_vals = [c["predicted"] for c in combined if c["predicted"] is not None]
+    last_projected = future_vals[-1] if future_vals else 0
+
+    parts = []
+    if slope > 0 and abs(slope) > 1e-6:
+        parts.append(p["forecast_up"].format(horizon=horizon, value=fmt_num(last_projected), r2=f"{r2:.2f}"))
+    elif slope < 0 and abs(slope) > 1e-6:
+        parts.append(p["forecast_down"].format(horizon=horizon, value=fmt_num(last_projected), r2=f"{r2:.2f}"))
+    else:
+        parts.append(p["forecast_flat"].format(value=fmt_num(last_projected)))
+
+    if r2 < 0.4:
+        parts.append(p["forecast_confidence_low"].format(r2=f"{r2:.2f}"))
+    else:
+        parts.append(p["forecast_confidence_ok"].format(r2=f"{r2:.2f}"))
+
+    if forecast_result.get("seasonalityUsed") and "forecast_seasonal_note" in p:
+        parts.append(p["forecast_seasonal_note"])
+
+    parts.append(p["forecast_risk"])
+    return json.dumps(" ".join(parts))
+
+
+# ============================================================================
+# RULE-BASED SQL GENERATOR (pattern matching over the detected schema)
+# ============================================================================
+def generate_sql(question, columns_json, numeric_cols_json):
+    question = json.loads(question)
+    columns = json.loads(columns_json)
+    numeric_cols = json.loads(numeric_cols_json)
+    q = question.lower().strip()
+
+    def find_col(text, cols):
+        for c in cols:
+            if c.lower() in text:
+                return c
+        return None
+
+    top_n_match = re.search(r"top\\s+(\\d+)", q)
+    bottom_n_match = re.search(r"(bottom|lowest|least)\\s+(\\d+)", q)
+    agg = "SUM"
+    if re.search(r"\\baverage\\b|\\bavg\\b", q):
+        agg = "AVG"
+    elif re.search(r"\\bcount\\b|\\bhow many\\b|\\bnumber of\\b", q):
+        agg = "COUNT"
+    elif re.search(r"\\bmax(imum)?\\b|\\bhighest single\\b", q):
+        agg = "MAX"
+    elif re.search(r"\\bmin(imum)?\\b", q):
+        agg = "MIN"
+
+    metric_col = find_col(q, numeric_cols) or (numeric_cols[0] if numeric_cols else None)
+    group_col = find_col(q, [c for c in columns if c != metric_col])
+
+    order_desc = not bool(re.search(r"lowest|least|ascending|bottom", q))
+    limit = None
+    if top_n_match:
+        limit = int(top_n_match.group(1))
+        order_desc = True
+    elif bottom_n_match:
+        limit = int(bottom_n_match.group(2))
+        order_desc = False
+
+    if group_col and metric_col:
+        agg_expr = "COUNT(*)" if agg == "COUNT" else f"{agg}({metric_col})"
+        sql = f"SELECT {group_col}, {agg_expr} AS {agg.lower()}_{metric_col}\\nFROM data\\nGROUP BY {group_col}\\nORDER BY {agg.lower()}_{metric_col} {'DESC' if order_desc else 'ASC'}"
+        if limit:
+            sql += f"\\nLIMIT {limit}"
+        return json.dumps(dict(sql=sql, matched=True))
+    elif metric_col:
+        agg_expr = "COUNT(*)" if agg == "COUNT" else f"{agg}({metric_col})"
+        return json.dumps(dict(sql=f"SELECT {agg_expr} AS result\\nFROM data", matched=True))
+    else:
+        return json.dumps(dict(
+            sql="-- Request thoda unclear tha, ismein koi known column/metric match nahi hua.\\nSELECT *\\nFROM data\\nLIMIT 100",
+            matched=False,
+        ))
+
+
+# ============================================================================
+# RULE-BASED CHAT (live pandas aggregates — no LLM)
+# ============================================================================
+CHAT_NO_MATCH = {
+    "hinglish": "Yeh sawaal thoda specific nahi tha. Try karo: 'sabse zyada {revenue} kis {customer} se aaya' ya 'total {revenue} kitna hai'.",
+    "hindi": "यह सवाल थोड़ा अस्पष्ट था। कोशिश करें: 'सबसे ज़्यादा {revenue} किस {customer} से आया' या 'कुल {revenue} कितना है'।",
+    "english": "That question wasn't specific enough. Try: 'which {customer} brought the most {revenue}' or 'what is total {revenue}'.",
+}
+
+def answer_chat(question, rows_json, revenue_col, customer_col, date_col, lang):
+    question = json.loads(question)
+    rows = json.loads(rows_json)
+    revenue_col = json.loads(revenue_col)
+    customer_col = json.loads(customer_col)
+    date_col = json.loads(date_col)
+    lang = json.loads(lang)
+
+    q = question.lower()
+    lp = PHRASES.get(lang, PHRASES["hinglish"])
+    fallback = CHAT_NO_MATCH.get(lang, CHAT_NO_MATCH["hinglish"]).format(
+        revenue=revenue_col or "value", customer=customer_col or "group"
+    )
+
+    if revenue_col is None or not rows:
+        return json.dumps(fallback)
+
+    df = pd.DataFrame(rows)
+    vals = df[revenue_col].map(to_number)
+    if customer_col:
+        df[customer_col] = df[customer_col].map(clean_str)
+
+    if re.search(r"total|sum|kitna|\\u0915\\u0941\\u0932", q) and not re.search(r"top|highest|sabse", q):
+        return json.dumps(lp["total"].format(metric=revenue_col, value=fmt_money(vals.sum()), records=fmt_num(len(df))))
+
+    if customer_col and re.search(r"top|highest|sabse (zyada|jyada)|best", q):
+        grp = df.groupby(customer_col)[revenue_col].apply(lambda s: s.map(to_number).sum()).sort_values(ascending=False)
+        if len(grp):
+            top_name, top_val = grp.index[0], grp.iloc[0]
+            share = top_val / vals.sum() * 100 if vals.sum() else 0
+            return json.dumps(lp["top_driver"].format(top=top_name, share=f"{share:.0f}") + " " + fmt_money(top_val))
+
+    if customer_col and re.search(r"lowest|least|worst|sabse kam", q):
+        grp = df.groupby(customer_col)[revenue_col].apply(lambda s: s.map(to_number).sum()).sort_values()
+        if len(grp):
+            return json.dumps(f"{grp.index[0]}: {fmt_money(grp.iloc[0])}")
+
+    if re.search(r"trend|growth|badh|ghat", q) and date_col:
+        d = df.copy()
+        d["_d"], _, _, _ = parse_date_col(d[date_col])
+        d = d.dropna(subset=["_d"])
+        d["_v"] = d[revenue_col].map(to_number)
+        ts = d.groupby(d["_d"].dt.date)["_v"].sum().sort_index()
+        if len(ts) >= 2:
+            g = (ts.iloc[-1] - ts.iloc[0]) / ts.iloc[0] * 100 if ts.iloc[0] else 0
+            key = "growth_up" if g > 3 else "growth_down" if g < -3 else "growth_flat"
+            return json.dumps(lp[key].format(growth=f"{abs(g):.1f}"))
+
+    if re.search(r"average|avg|\\u0914\\u0938\\u0924", q):
+        return json.dumps(f"{revenue_col} average: {fmt_money(vals.mean())}")
+
+    if re.search(r"how many|count|kitne", q):
+        return json.dumps(fmt_num(len(df)))
+
+    return json.dumps(fallback)
+
+
+# ============================================================================
+# DATA QUALITY — null%, duplicates, per-column stats (pandas)
+# ============================================================================
+def data_quality(rows_json, date_col_json="null"):
+    rows = json.loads(rows_json)
+    date_col = json.loads(date_col_json)
+    if not rows:
+        return json.dumps(dict(totalRows=0, duplicateRows=0, columns=[], dateDiagnostics=None))
+    df = pd.DataFrame(rows)
+    total = len(df)
+    dup_count = int(df.duplicated().sum())
+
+    col_stats = []
+    for col in df.columns:
+        series = df[col]
+        null_count = int(series.isna().sum() + (series.astype(object) == "").sum())
+        null_pct = round(null_count / total * 100, 1) if total else 0
+        uniq = int(series.nunique())
+        sample = series.dropna().astype(object).head(20).tolist()
+        num_hits = sum(not np.isnan(to_number(v)) for v in sample) if sample else 0
+        kind = "numeric" if sample and num_hits >= 0.7 * len(sample) else "text"
+        col_stats.append(dict(
+            name=col, nullCount=null_count, nullPct=null_pct,
+            uniqueCount=uniq, kind=kind,
+        ))
+
+    # Surface the day-first/month-first decision (and how much of the column
+    # actually parsed) so a silently-misread date column shows up here
+    # instead of just producing a subtly wrong trend/forecast chart.
+    date_diagnostics = None
+    if date_col and date_col in df.columns:
+        raw = df[date_col]
+        non_null = int(raw.notna().sum() - (raw.astype(object) == "").sum())
+        if non_null > 0:
+            parsed, dayfirst_used, had_evidence, date_mode = parse_date_col(raw)
+            parse_fail = int(parsed.isna().sum()) - int(raw.isna().sum() + (raw.astype(object) == "").sum())
+            parse_fail = max(0, parse_fail)
+            if date_mode == "iso":
+                format_label = "YYYY-MM-DD (ISO, unambiguous)"
+            elif dayfirst_used:
+                format_label = "DD/MM/YYYY (day-first)"
+            else:
+                format_label = "MM/DD/YYYY (month-first)"
+            date_diagnostics = dict(
+                column=date_col,
+                dayfirst=bool(dayfirst_used),
+                format=format_label,
+                confirmedByData=bool(had_evidence),
+                unparsedCount=parse_fail,
+                unparsedPct=round(parse_fail / non_null * 100, 1) if non_null else 0,
+            )
+
+    return json.dumps(dict(totalRows=total, duplicateRows=dup_count, columns=col_stats, dateDiagnostics=date_diagnostics))
+
+
+# ============================================================================
+# ANOMALY DETECTION — z-score outliers on the revenue time series (numpy)
+# ============================================================================
+def detect_anomalies(timeseries_json):
+    ts = json.loads(timeseries_json)
+    n = len(ts)
+    if n < 5:
+        return json.dumps([])
+    values = np.array([p["value"] for p in ts], dtype=float)
+    mean = values.mean()
+    std = values.std()
+    if std == 0:
+        return json.dumps([])
+    z_scores = (values - mean) / std
+    anomalies = []
+    for i, z in enumerate(z_scores):
+        if abs(z) >= 2.0:
+            anomalies.append(dict(
+                date=ts[i]["date"], value=float(values[i]),
+                z=round(float(z), 2), direction="high" if z > 0 else "low",
+            ))
+    return json.dumps(anomalies)
+
+`;
+
+
+/* -------------------------------- PERSISTENCE ------------------------------- */
+/* Wrapped in try/catch: private-browsing/storage-disabled contexts throw on
+   access, and this app should degrade to in-memory-only rather than crash. */
+const LS_PREFIX = "ledgerai_";
+function lsGet(key, fallback) {
+  try {
+    const raw = localStorage.getItem(LS_PREFIX + key);
+    return raw === null ? fallback : JSON.parse(raw);
+  } catch (e) {
+    return fallback;
+  }
+}
+function lsSet(key, value) {
+  try {
+    localStorage.setItem(LS_PREFIX + key, JSON.stringify(value));
+    return true;
+  } catch (e) {
+    /* storage full or unavailable — caller decides whether to warn the user */
+    return false;
+  }
+}
+function lsRemove(key) {
+  try {
+    localStorage.removeItem(LS_PREFIX + key);
+  } catch (e) {}
+}
+
+/* localStorage has a hard ~5-10MB quota per origin, which real-world
+   uploaded datasets (the one thing that actually needs persisting) can
+   blow past silently. IndexedDB's effective quota is a large share of
+   free disk space (typically hundreds of MB to several GB depending on
+   the browser) — this moves the one thing that's ever big (`rows`) there,
+   while small settings (theme, manual column overrides) stay in the
+   synchronous localStorage helpers above since there's no benefit to
+   making those async too. */
+const IDB_NAME = "ledgerai_db";
+const IDB_STORE = "kv";
+function idbOpen() {
+  return new Promise((resolve, reject) => {
+    if (typeof indexedDB === "undefined") {
+      reject(new Error("IndexedDB not available in this browser/context."));
+      return;
+    }
+    const req = indexedDB.open(IDB_NAME, 1);
+    req.onupgradeneeded = () => {
+      if (!req.result.objectStoreNames.contains(IDB_STORE)) {
+        req.result.createObjectStore(IDB_STORE);
+      }
+    };
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error || new Error("IndexedDB open failed"));
+  });
+}
+async function idbGet(key) {
+  try {
+    const db = await idbOpen();
+    return await new Promise((resolve, reject) => {
+      const tx = db.transaction(IDB_STORE, "readonly");
+      const req = tx.objectStore(IDB_STORE).get(key);
+      req.onsuccess = () => resolve(req.result === undefined ? null : req.result);
+      req.onerror = () => reject(req.error);
+    });
+  } catch (e) {
+    console.error("[LedgerAI] IndexedDB read failed:", e);
+    return null;
+  }
+}
+async function idbSet(key, value) {
+  try {
+    const db = await idbOpen();
+    await new Promise((resolve, reject) => {
+      const tx = db.transaction(IDB_STORE, "readwrite");
+      tx.objectStore(IDB_STORE).put(value, key);
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error);
+    });
+    return true;
+  } catch (e) {
+    console.error("[LedgerAI] IndexedDB write failed:", e);
+    return false;
+  }
+}
+async function idbRemove(key) {
+  try {
+    const db = await idbOpen();
+    await new Promise((resolve, reject) => {
+      const tx = db.transaction(IDB_STORE, "readwrite");
+      tx.objectStore(IDB_STORE).delete(key);
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error);
+    });
+  } catch (e) {}
+}
+
+/* ------------------------------- SAMPLE DATA -------------------------------- */
+function genSampleData() {
+  const customers = ["Nimbus Retail", "Arka Textiles", "Vertex Logistics", "Solara Foods", "Kestrel Media", "Bluepeak Tech", "Orchid Pharma", "Granite Motors"];
+  const regions = ["North", "South", "East", "West"];
+  const products = ["Starter Plan", "Growth Plan", "Enterprise Plan", "Add-on: Analytics", "Add-on: Support"];
+  const rows = [];
+  const start = new Date(2024, 6, 1);
+  for (let m = 0; m < 24; m++) {
+    const d = new Date(start.getFullYear(), start.getMonth() + m, 1);
+    const seasonal = 1 + 0.15 * Math.sin((m / 12) * Math.PI * 2);
+    const trend = 1 + m * 0.045;
+    const rowsThisMonth = 6 + Math.floor(Math.random() * 4);
+    for (let r = 0; r < rowsThisMonth; r++) {
+      const base = 8000 + Math.random() * 14000;
+      const revenue = Math.round(base * seasonal * trend);
+      const units = Math.round(revenue / (120 + Math.random() * 60));
+      const cost = Math.round(revenue * (0.42 + Math.random() * 0.15));
+      rows.push({
+        Date: d.toISOString().slice(0, 10),
+        Customer: customers[Math.floor(Math.random() * customers.length)],
+        Region: regions[Math.floor(Math.random() * regions.length)],
+        Product: products[Math.floor(Math.random() * products.length)],
+        Revenue: revenue,
+        Units: units,
+        Cost: cost,
+      });
+    }
+  }
+  return rows;
+}
+
+/* --------------------------------- HELPERS --------------------------------- */
+/* Display-only formatters for chart axes/tooltips. All data parsing,
+   column detection, and number cleaning happens in Python (py_engine)
+   now — these just format already-computed numbers for the UI. */
+function fmtMoney(n) {
+  if (n === undefined || n === null || isNaN(n)) return "\u2014";
+  const sign = n < 0 ? "-" : "";
+  const abs = Math.abs(n);
+  if (abs >= 1e7) return sign + (abs / 1e7).toFixed(2) + "Cr";
+  if (abs >= 1e5) return sign + (abs / 1e5).toFixed(2) + "L";
+  if (abs >= 1e3) return sign + (abs / 1e3).toFixed(1) + "K";
+  return sign + Math.round(abs).toString();
+}
+function fmtNum(n) {
+  if (n === undefined || n === null || isNaN(n)) return "\u2014";
+  return Math.round(n).toLocaleString("en-IN");
+}
+
+/* All "AI" features (Insight, Forecast Narrative, SQL Generator, Chat) run
+   entirely through Python via Pyodide (loaded below) — numpy/pandas
+   for the actual analysis, hand-written multi-language templates for the
+   narrative text. No cloud API, no API key, works fully offline once the
+   Python runtime has loaded once. */
+let pyodideInstance = null;
+
+async function callPy(name, ...args) {
+  if (!pyodideInstance) throw new Error("Python engine abhi load ho raha hai, thoda ruko.");
+  const fn = pyodideInstance.globals.get(name);
+  const jsonArgs = args.map((a) => JSON.stringify(a));
+  const raw = fn(...jsonArgs);
+  return JSON.parse(raw);
+}
+
+
+/* ============================================================================
+   MAIN COMPONENT
+   ============================================================================ */
+function BIDashboard() {
+  const [view, setView] = useState("dashboard");
+  const [theme, setTheme] = useState(() => lsGet("theme", "dark"));
+  // Start with the sample dataset synchronously — any real persisted data
+  // (in IndexedDB, loaded async below) replaces it once hydration finishes.
+  // `hydrated` gates the save-effect further down so we never overwrite a
+  // real saved dataset with this placeholder before it's had a chance to load.
+  const [rows, setRows] = useState(() => genSampleData());
+  const [fileName, setFileName] = useState("sample_sales_data.csv (demo data)");
+  const [hydrated, setHydrated] = useState(false);
+  // Tracks whether `rows` is still the untouched initial placeholder, so
+  // the async hydration read below can tell "nothing's happened yet, safe
+  // to apply stored data" apart from "the user already uploaded a file in
+  // the brief window before IndexedDB responded" (rare, but async reads
+  // mean it's now possible, unlike the old synchronous localStorage init).
+  const rowsRef = useRef(rows);
+  useEffect(() => { rowsRef.current = rows; }, [rows]);
+  const initialRowsRef = useRef(rows); // captured once, at first render only
+  const [parseError, setParseError] = useState("");
+  const fileInputRef = useRef(null);
+
+  // Visible feedback for uploads: "processing" while parsing, then
+  // "success"/"error" for a few seconds so the user isn't left guessing
+  // whether their file actually loaded.
+  const [uploadToast, setUploadToast] = useState(null); // {type, text} | null
+  const toastTimerRef = useRef(null);
+  const showToast = useCallback((type, text, autoDismissMs = 4000) => {
+    if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
+    setUploadToast({ type, text });
+    if (autoDismissMs) {
+      toastTimerRef.current = setTimeout(() => setUploadToast(null), autoDismissMs);
+    }
+  }, []);
+
+  // Multi-sheet Excel support: workbook is kept in a ref (not state — it's
+  // not JSON-serialisable and doesn't need to trigger renders itself).
+  const workbookRef = useRef(null);
+  const [sheetNames, setSheetNames] = useState([]);
+  const [activeSheet, setActiveSheet] = useState(null);
+
+  const ct = useMemo(
+    () =>
+      theme === "dark"
+        ? { grid: "#232A38", tick: "#8A93A6", tooltipBg: "#161B27", tooltipBorder: "#232A38", accent: "#E8B34D", blue: "#5B9BD9" }
+        : { grid: "#DCD5C4", tick: "#7A7160", tooltipBg: "#FFFFFF", tooltipBorder: "#DCD5C4", accent: "#B8791E", blue: "#2E6DA4" },
+    [theme]
+  );
+
+  useEffect(() => { lsSet("theme", theme); }, [theme]);
+
+  // Hydrate `rows`/`fileName` from IndexedDB on mount (once). If nothing's
+  // there yet, fall back to migrating any dataset a pre-IndexedDB version
+  // of this app left behind in localStorage (only present at all if it was
+  // small enough to have fit under that old 5-10MB quota), then clean up
+  // the old keys so we don't keep checking them on every future load.
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      let stored = await idbGet("dataset");
+      if (!stored || !stored.rows || !stored.rows.length) {
+        const legacyRows = lsGet("rows", null);
+        if (legacyRows && legacyRows.length) {
+          const legacyFileName = lsGet("fileName", fileName);
+          stored = { rows: legacyRows, fileName: legacyFileName };
+          await idbSet("dataset", stored);
+          lsRemove("rows");
+          lsRemove("fileName");
+        }
+      }
+      if (cancelled) return;
+      if (stored && stored.rows && stored.rows.length && rowsRef.current === initialRowsRef.current) {
+        setRows(stored.rows);
+        setFileName(stored.fileName || fileName);
+      }
+      setHydrated(true);
+    })();
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Persist `rows`/`fileName` to IndexedDB whenever either changes — but
+  // only after hydration has finished, so the initial sample-data
+  // placeholder never overwrites a real dataset that's still loading.
+  useEffect(() => {
+    if (!hydrated) return;
+    (async () => {
+      const ok = await idbSet("dataset", { rows, fileName });
+      if (!ok && rows && rows.length > 0) {
+        showToast("warn", `"${fileName}" is data ke saath kaam kar raha hai, lekin isse browser mein save nahi kiya ja saka (private browsing ya storage disabled ho sakta hai) — page reload karne par yeh yaad nahi rahega (is session mein sab kuch normally kaam karega).`, 7000);
+      }
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [rows, fileName, hydrated]);
+
+  /* Manual overrides let the user correct detection when column names are
+     unusual (in any language/format) — auto-detect is a best guess, this
+     always wins over it. Reset whenever a new file is loaded. */
+  const [manualDate, setManualDate] = useState(() => lsGet("manualDate", null));
+  const [manualRevenue, setManualRevenue] = useState(() => lsGet("manualRevenue", null));
+  const [manualCustomer, setManualCustomer] = useState(() => lsGet("manualCustomer", null));
+  useEffect(() => { lsSet("manualDate", manualDate); }, [manualDate]);
+  useEffect(() => { lsSet("manualRevenue", manualRevenue); }, [manualRevenue]);
+  useEffect(() => { lsSet("manualCustomer", manualCustomer); }, [manualCustomer]);
+
+  /* Global date-range filter — applied before any analysis runs, so every
+     view (KPIs, charts, forecast, customers) reflects the selected range. */
+  const [filterStart, setFilterStart] = useState("");
+  const [filterEnd, setFilterEnd] = useState("");
+
+  /* ---------------- Python engine (Pyodide) ---------------- */
+  /* Every bit of "analysis" — column detection, KPIs, time series,
+     category/customer breakdowns, and the revenue forecast — runs in real
+     Python (numpy/pandas) inside the browser via Pyodide. No cloud
+     API, no API key, works fully offline once the runtime has loaded once
+     (subsequent visits reuse the browser's cache). */
+  const [pyReady, setPyReady] = useState(false);
+  const [pyLoadError, setPyLoadError] = useState("");
+  const [pyLoadStage, setPyLoadStage] = useState("Ledger AI taiyaar ho raha hai\u2026");
+  const [pyState, setPyState] = useState(null);
+
+  const [pySlowLoad, setPySlowLoad] = useState(false);
+  useEffect(() => {
+    if (pyReady || pyLoadError) return;
+    const t = setTimeout(() => setPySlowLoad(true), 15000);
+    return () => clearTimeout(t);
+  }, [pyReady, pyLoadError]);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        console.log("[LedgerAI] waiting for Pyodide runtime (kicked off earlier)...");
+        if (!cancelled) setPyLoadStage("Ledger AI taiyaar ho raha hai\u2026");
+        // The head script starts loading Pyodide + numpy/pandas the instant
+        // pyodide.js itself is available, before this component even mounts.
+        // Fall back to starting it here if that somehow didn't run.
+        const pyodidePromise = window.__pyodideReadyPromise || (async () => {
+          const p = await loadPyodide({ indexURL: "https://cdn.jsdelivr.net/pyodide/v0.26.4/full/" });
+          await p.loadPackage(["numpy", "pandas"]);
+          return p;
+        })();
+        const pyodide = await pyodidePromise;
+        console.log("[LedgerAI] packages ready, running analysis engine...");
+        if (!cancelled) setPyLoadStage("Bas ek pal\u2026");
+        pyodide.runPython(PY_ENGINE_SOURCE);
+        console.log("[LedgerAI] Python engine ready.");
+        if (!cancelled) {
+          pyodideInstance = pyodide;
+          setPyReady(true);
+        }
+      } catch (e) {
+        console.error("[LedgerAI] Python engine failed to load:", e);
+        if (!cancelled) setPyLoadError((e && e.message) || String(e));
+      }
+    })();
+    return () => { cancelled = true; };
+  }, []);
+
+  // Caches the last detect_columns() result keyed by the exact `rows`
+  // reference. Column-type detection only needs to re-run when the data
+  // itself changes — not when the user tweaks the date-range filter — so
+  // this skips a redundant pandas pass over the (potentially large,
+  // unfiltered) full dataset on every filter tweak.
+  const autoDetectCacheRef = useRef({ rowsRef: null, auto: null });
+
+  useEffect(() => {
+    if (!pyReady) return;
+    let cancelled = false;
+    (async () => {
+      // Each piece below is independently guarded: if one Python call fails
+      // (e.g. an edge case in a newer function like correlation matrix),
+      // it no longer blanks out everything else — core KPIs/trend/forecast
+      // still render even if a side feature has a problem.
+      const safeCall = async (label, fn, fallback) => {
+        try {
+          return await fn();
+        } catch (e) {
+          console.error(`[LedgerAI] "${label}" failed:`, e);
+          return fallback;
+        }
+      };
+
+      let auto;
+      if (autoDetectCacheRef.current.rowsRef === rows) {
+        auto = autoDetectCacheRef.current.auto;
+      } else {
+        try {
+          auto = await callPy("detect_columns", rows);
+        } catch (e) {
+          console.error("[LedgerAI] detect_columns failed:", e);
+          if (!cancelled) setPyState(null);
+          return;
+        }
+        if (cancelled) return;
+        autoDetectCacheRef.current = { rowsRef: rows, auto };
+      }
+
+      const dateCol = manualDate || auto.dateCol;
+      const revenueCol = manualRevenue || auto.revenueCol;
+      const customerCol = manualCustomer || auto.customerCol;
+
+      // Apply the global date-range filter (if set) before any analysis —
+      // every KPI/chart/forecast below reflects only the selected range.
+      let scopedRows = rows;
+      if (dateCol && (filterStart || filterEnd)) {
+        const startTime = filterStart ? new Date(filterStart).getTime() : -Infinity;
+        const endTime = filterEnd ? new Date(filterEnd).getTime() + 86399999 : Infinity;
+        scopedRows = rows.filter((r) => {
+          const t = new Date(r[dateCol]).getTime();
+          return !isNaN(t) && t >= startTime && t <= endTime;
+        });
+      }
+
+      const kpis = await safeCall("compute_kpis", () => callPy("compute_kpis", scopedRows, revenueCol, customerCol, dateCol), []);
+      const timeSeries = await safeCall("build_time_series", () => callPy("build_time_series", scopedRows, dateCol, revenueCol), []);
+      const catCol = auto.stringCols.find((c) => c !== customerCol) || customerCol;
+      const categoryBreakdown = await safeCall("category_breakdown", () => callPy("category_breakdown", scopedRows, catCol, revenueCol), []);
+      const customerRanking = await safeCall("customer_ranking", () => callPy("customer_ranking", scopedRows, customerCol, revenueCol), []);
+      const customerSegments = await safeCall("customer_segments", () => callPy("customer_segments", customerRanking), []);
+      const dataQuality = await safeCall("data_quality", () => callPy("data_quality", scopedRows, dateCol), { totalRows: 0, duplicateRows: 0, columns: [], dateDiagnostics: null });
+
+      let forecast = { combined: [], slope: 0, r2: 0 };
+      if (timeSeries.length >= 3) {
+        forecast = await safeCall("run_forecast", () => callPy("run_forecast", timeSeries, 6), forecast);
+      }
+      let anomalies = [];
+      if (timeSeries.length >= 5) {
+        anomalies = await safeCall("detect_anomalies", () => callPy("detect_anomalies", timeSeries), []);
+      }
+      let growthBreakdown = [];
+      if (timeSeries.length >= 2) {
+        growthBreakdown = await safeCall("growth_breakdown", () => callPy("growth_breakdown", timeSeries), []);
+      }
+      let correlationMatrix = { columns: [], matrix: [] };
+      if (auto.numericCols.length >= 2) {
+        correlationMatrix = await safeCall("correlation_matrix", () => callPy("correlation_matrix", scopedRows, auto.numericCols), correlationMatrix);
+      }
+
+      if (!cancelled) {
+        setPyState({
+          columns: auto.columns, numericCols: auto.numericCols, stringCols: auto.stringCols,
+          dateCol, revenueCol, customerCol, autoDetected: auto, scopedRowCount: scopedRows.length,
+          scopedRows, kpis, timeSeries, categoryBreakdown, customerRanking, customerSegments, forecast,
+          dataQuality, anomalies, growthBreakdown, correlationMatrix,
+        });
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [pyReady, rows, manualDate, manualRevenue, manualCustomer, filterStart, filterEnd]);
+
+  const columns = pyState?.columns || [];
+  const numericCols = pyState?.numericCols || [];
+  const stringCols = pyState?.stringCols || [];
+  const dateCol = pyState?.dateCol || null;
+  const revenueCol = pyState?.revenueCol || null;
+  const customerCol = pyState?.customerCol || null;
+  const autoDetected = pyState?.autoDetected || { columns: [], numericCols: [], stringCols: [], dateCol: null, revenueCol: null, customerCol: null };
+  const kpis = pyState?.kpis || [];
+  const timeSeries = pyState?.timeSeries || [];
+  const categoryBreakdown = pyState?.categoryBreakdown || [];
+  const customerRanking = pyState?.customerRanking || [];
+  const customerSegments = pyState?.customerSegments || [];
+  const forecast = pyState?.forecast || { combined: [], slope: 0, r2: 0 };
+  const dataQuality = pyState?.dataQuality || { totalRows: 0, duplicateRows: 0, columns: [] };
+  const anomalies = pyState?.anomalies || [];
+  const scopedRowCount = pyState?.scopedRowCount ?? rows.length;
+  // Same date-range-filtered rows that every other view (KPIs, charts,
+  // forecast, customers) already uses — Chat needs this too, or its
+  // answers silently ignore the active date filter while every number
+  // on screen reflects it. Falls back to the full dataset before the
+  // analysis pipeline has run once, or when no filter is set.
+  const scopedRows = pyState?.scopedRows || rows;
+  const growthBreakdown = pyState?.growthBreakdown || [];
+  const correlationMatrix = pyState?.correlationMatrix || { columns: [], matrix: [] };
+
+
+  /* ---------------- file upload ---------------- */
+  const MAX_FILE_SIZE_MB = 15;
+
+  const handleFile = useCallback((file) => {
+    if (!file) return;
+    setParseError("");
+
+    const sizeMB = file.size / (1024 * 1024);
+    if (sizeMB > MAX_FILE_SIZE_MB) {
+      const msg = `"${file.name}" (${sizeMB.toFixed(1)}MB) ${MAX_FILE_SIZE_MB}MB ki limit se bada hai — browser mein itna bada file process karna slow/crash ho sakta hai. Chhoti file try karein ya data ko split karein.`;
+      setParseError(msg);
+      showToast("error", msg, 6000);
+      return;
+    }
+
+    showToast("info", `"${file.name}" process ho raha hai\u2026`, 0);
+
+    const ext = file.name.split(".").pop().toLowerCase();
+    if (ext === "csv") {
+      workbookRef.current = null;
+      setSheetNames([]);
+      setActiveSheet(null);
+      Papa.parse(file, {
+        header: true,
+        skipEmptyLines: true,
+        dynamicTyping: true,
+        complete: (res) => {
+          if (!res.data || !res.data.length) {
+            const msg = "File khaali lag raha hai ya format samajh nahi aaya.";
+            setParseError(msg);
+            showToast("error", msg, 5000);
+            return;
+          }
+          setRows(res.data);
+          setFileName(file.name);
+          setManualDate(null); setManualRevenue(null); setManualCustomer(null);
+          showToast("success", `"${file.name}" load ho gayi \u2014 ${res.data.length} rows, ${Object.keys(res.data[0]).length} columns.`);
+        },
+        error: () => {
+          const msg = "CSV parse nahi ho paayi. File format check karein.";
+          setParseError(msg);
+          showToast("error", msg, 5000);
+        },
+      });
+    } else if (ext === "xlsx" || ext === "xls") {
+      const reader = new FileReader();
+      reader.onload = (e) => {
+        try {
+          const wb = XLSX.read(e.target.result, { type: "array" });
+          const firstSheetName = wb.SheetNames[0];
+          const sheet = wb.Sheets[firstSheetName];
+          const json = XLSX.utils.sheet_to_json(sheet, { defval: "" });
+          if (!json.length) {
+            const msg = "Sheet me data nahi mila.";
+            setParseError(msg);
+            showToast("error", msg, 5000);
+            return;
+          }
+          workbookRef.current = wb;
+          setSheetNames(wb.SheetNames);
+          setActiveSheet(firstSheetName);
+          setRows(json);
+          setFileName(file.name);
+          setManualDate(null); setManualRevenue(null); setManualCustomer(null);
+          showToast("success", `"${file.name}" load ho gayi \u2014 ${json.length} rows, ${Object.keys(json[0]).length} columns${wb.SheetNames.length > 1 ? ` (${wb.SheetNames.length} sheets mili)` : ""}.`);
+        } catch (err) {
+          const msg = "Excel file parse nahi ho paayi.";
+          setParseError(msg);
+          showToast("error", msg, 5000);
+        }
+      };
+      reader.onerror = () => {
+        const msg = "File read nahi ho payi \u2014 file corrupt ho sakti hai ya browser ne access deny kiya.";
+        setParseError(msg);
+        showToast("error", msg, 5000);
+      };
+      reader.readAsArrayBuffer(file);
+    } else {
+      const msg = "Sirf .csv, .xlsx ya .xls files supported hain.";
+      setParseError(msg);
+      showToast("error", msg, 5000);
+    }
+  }, [showToast]);
+
+  // Switch between sheets of an already-loaded workbook without re-uploading.
+  const switchSheet = useCallback((sheetName) => {
+    const wb = workbookRef.current;
+    if (!wb || !wb.Sheets[sheetName]) return;
+    const json = XLSX.utils.sheet_to_json(wb.Sheets[sheetName], { defval: "" });
+    if (!json.length) {
+      const msg = `Sheet "${sheetName}" khaali hai.`;
+      setParseError(msg);
+      showToast("error", msg, 5000);
+      return;
+    }
+    setParseError("");
+    setActiveSheet(sheetName);
+    setRows(json);
+    setManualDate(null); setManualRevenue(null); setManualCustomer(null);
+    showToast("success", `Sheet "${sheetName}" load ho gayi \u2014 ${json.length} rows.`);
+  }, [showToast]);
+
+  const loadSampleData = useCallback(() => {
+    workbookRef.current = null;
+    setSheetNames([]);
+    setActiveSheet(null);
+    setRows(genSampleData());
+    setFileName("sample_sales_data.csv (demo data)");
+    setManualDate(null); setManualRevenue(null); setManualCustomer(null);
+    setParseError("");
+    showToast("success", "Demo data load ho gaya.");
+  }, [showToast]);
+
+  const downloadCSV = useCallback((data, filename) => {
+    if (!data || !data.length) return;
+    const csv = Papa.unparse(data);
+    const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  }, []);
+
+  const onDrop = (e) => {
+    e.preventDefault();
+    const f = e.dataTransfer.files?.[0];
+    handleFile(f);
+  };
+
+  /* ---------------- nav ---------------- */
+  const NAV = [
+    { id: "dashboard", label: "AI Dashboard", icon: LayoutDashboard },
+    { id: "forecast", label: "Revenue Forecast", icon: TrendingUp },
+    { id: "customers", label: "Customer Analytics", icon: Users },
+    { id: "sql", label: "SQL Generator", icon: Terminal },
+    { id: "chat", label: "AI Chat with Data", icon: MessageSquare },
+    { id: "upload", label: "Upload Data", icon: Upload },
+  ];
+  const viewTitles = {
+    dashboard: ["AI Dashboard", "Auto-generated KPIs and trends from your data"],
+    forecast: ["Revenue Prediction", "Linear trend projection, next 6 periods"],
+    customers: ["Customer Analytics", "Ranking, segments and concentration"],
+    sql: ["SQL Query Generator", "Plain English \u2192 SQL, based on your uploaded schema"],
+    chat: ["AI Chat with Data", "Ask questions about your dataset in natural language"],
+    upload: ["Upload Data", "Bring your own CSV / Excel file"],
+  };
+
+
+  return (
+    <div className={`bi-root ${theme}`}>
+      <style>{THEME}</style>
+
+      {uploadToast && (
+        <div className={`toast-wrap no-print toast-${uploadToast.type}`} role="status" aria-live="polite">
+          {uploadToast.type === "success" && <Check size={16} style={{ color: "var(--pos)", flexShrink: 0, marginTop: 1 }} />}
+          {uploadToast.type === "error" && <AlertTriangle size={16} style={{ color: "var(--neg)", flexShrink: 0, marginTop: 1 }} />}
+          {uploadToast.type === "warn" && <AlertTriangle size={16} style={{ color: "var(--accent)", flexShrink: 0, marginTop: 1 }} />}
+          {uploadToast.type === "info" && <Loader2 size={16} style={{ color: "var(--accent)", flexShrink: 0, marginTop: 1, animation: "spin 1s linear infinite" }} />}
+          <div style={{ fontSize: 13, lineHeight: 1.5, flex: 1 }}>{uploadToast.text}</div>
+          <button className="toast-close" onClick={() => setUploadToast(null)} aria-label="Dismiss notification">
+            &times;
+          </button>
+        </div>
+      )}
+
+      <Ticker kpis={kpis} rows={rows} />
+
+      <div className="bi-body">
+        <aside className="bi-sidebar">
+          <div className="bi-brand">
+            <div className="bi-brand-mark">L</div>
+            <div className="bi-brand-name bi-display">Ledger AI</div>
+          </div>
+          {NAV.map((item) => (
+            <button
+              key={item.id}
+              className={`nav-item ${view === item.id ? "active" : ""}`}
+              onClick={() => setView(item.id)}
+              aria-current={view === item.id ? "page" : undefined}
+            >
+              <item.icon size={16} />
+              {item.label}
+            </button>
+          ))}
+          <div style={{ marginTop: "auto", paddingTop: 14, borderTop: "1px solid var(--border)", fontSize: 11, color: "var(--muted)" }}>
+            <Database size={12} style={{ verticalAlign: "-2px", marginRight: 5 }} />
+            {rows.length} rows loaded
+            {!pyReady && !pyLoadError && (
+              <div style={{ marginTop: 8, display: "flex", alignItems: "center", gap: 6, color: "var(--accent)" }}>
+                <Loader2 size={11} style={{ animation: "spin 1s linear infinite", flexShrink: 0 }} />
+                <span>{pyLoadStage} (AI features)</span>
+              </div>
+            )}
+            {!pyReady && !pyLoadError && pySlowLoad && (
+              <button className="btn no-print" style={{ marginTop: 8, padding: "4px 8px", fontSize: 10.5 }} onClick={() => window.location.reload()}>
+                Try Again
+              </button>
+            )}
+            {pyLoadError && (
+              <div style={{ marginTop: 8 }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 6, color: "var(--neg)", marginBottom: 6 }}>
+                  <AlertTriangle size={11} style={{ flexShrink: 0 }} />
+                  <span>AI features load nahi hue</span>
+                </div>
+                <button className="btn no-print" style={{ padding: "4px 8px", fontSize: 10.5 }} onClick={() => window.location.reload()}>
+                  Try Again
+                </button>
+              </div>
+            )}
+          </div>
+        </aside>
+
+        <main className="bi-main">
+          <div className="bi-topbar">
+            <div>
+              <div className="bi-topbar-title bi-display">{viewTitles[view][0]}</div>
+              <div className="bi-topbar-sub">{viewTitles[view][1]}</div>
+            </div>
+            <div className="bi-topbar-actions" style={{ display: "flex", gap: 8 }}>
+              <button
+                className="theme-toggle"
+                onClick={() => setTheme((t) => (t === "dark" ? "light" : "dark"))}
+                title="Toggle light / dark theme"
+                aria-label={theme === "dark" ? "Switch to light theme" : "Switch to dark theme"}
+              >
+                {theme === "dark" ? <Sun size={14} /> : <Moon size={14} />}
+              </button>
+              <button className="btn" onClick={() => window.print()}>
+                <FileDown size={14} /> Export PDF
+              </button>
+              <button className="btn btn-accent" onClick={() => fileInputRef.current?.click()}>
+                <Upload size={14} /> Upload Data
+              </button>
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept=".csv,.xlsx,.xls"
+                style={{ display: "none" }}
+                onChange={(e) => handleFile(e.target.files?.[0])}
+              />
+            </div>
+          </div>
+
+          {dateCol && (
+            <div className="filter-bar no-print">
+              <Filter size={13} style={{ color: "var(--muted)", flexShrink: 0 }} />
+              <span style={{ fontSize: 12, color: "var(--muted)" }}>Date range:</span>
+              <input type="date" className="bi-date-input" value={filterStart} onChange={(e) => setFilterStart(e.target.value)} />
+              <span style={{ fontSize: 12, color: "var(--muted)" }}>to</span>
+              <input type="date" className="bi-date-input" value={filterEnd} onChange={(e) => setFilterEnd(e.target.value)} />
+              {(filterStart || filterEnd) && (
+                <button className="btn" style={{ padding: "4px 10px" }} onClick={() => { setFilterStart(""); setFilterEnd(""); }}>
+                  Clear
+                </button>
+              )}
+              {(filterStart || filterEnd) && (
+                <span style={{ fontSize: 12, color: "var(--muted)", marginLeft: "auto" }}>
+                  {scopedRowCount} / {rows.length} rows in range
+                </span>
+              )}
+            </div>
+          )}
+
+          <div className="bi-content" key={view}>
+            <div className="view-fade">
+            {parseError && (
+              <div className="card" style={{ borderColor: "var(--neg)", marginBottom: 16, color: "var(--neg)", fontSize: 13 }}>
+                {parseError}
+              </div>
+            )}
+
+            {view === "dashboard" && (
+              <DashboardView
+                kpis={kpis}
+                timeSeries={timeSeries}
+                categoryBreakdown={categoryBreakdown}
+                rows={rows}
+                columns={columns}
+                revenueCol={revenueCol}
+                dateCol={dateCol}
+                customerCol={customerCol}
+                ct={ct}
+                setView={setView}
+                anomalies={anomalies}
+                correlationMatrix={correlationMatrix}
+                pyReady={pyReady}
+                pyLoadError={pyLoadError}
+              />
+            )}
+            {view === "forecast" && (
+              <ForecastView forecast={forecast} revenueCol={revenueCol} dateCol={dateCol} rows={rows} ct={ct} growthBreakdown={growthBreakdown} pyReady={pyReady} pyLoadError={pyLoadError} />
+            )}
+            {view === "customers" && (
+              <CustomersView
+                customerRanking={customerRanking}
+                customerSegments={customerSegments}
+                customerCol={customerCol}
+                revenueCol={revenueCol}
+                ct={ct}
+                downloadCSV={downloadCSV}
+                pyReady={pyReady}
+                pyLoadError={pyLoadError}
+              />
+            )}
+            {view === "sql" && <SQLGeneratorView columns={columns} numericCols={numericCols} stringCols={stringCols} fileName={fileName} />}
+            {view === "chat" && (
+              <ChatView rows={scopedRows} columns={columns} kpis={kpis} revenueCol={revenueCol} customerCol={customerCol} dateCol={dateCol} filtered={Boolean(dateCol && (filterStart || filterEnd))} />
+            )}
+            {view === "upload" && (
+              <UploadView
+                onDrop={onDrop}
+                fileInputRef={fileInputRef}
+                handleFile={handleFile}
+                fileName={fileName}
+                rows={rows}
+                columns={columns}
+                autoDetected={autoDetected}
+                dateCol={dateCol}
+                revenueCol={revenueCol}
+                customerCol={customerCol}
+                manualDate={manualDate}
+                manualRevenue={manualRevenue}
+                manualCustomer={manualCustomer}
+                setManualDate={setManualDate}
+                setManualRevenue={setManualRevenue}
+                setManualCustomer={setManualCustomer}
+                sheetNames={sheetNames}
+                activeSheet={activeSheet}
+                switchSheet={switchSheet}
+                loadSampleData={loadSampleData}
+                downloadCSV={downloadCSV}
+                dataQuality={dataQuality}
+              />
+            )}
+            </div>
+          </div>
+        </main>
+      </div>
+    </div>
+  );
+}
+
+/* ============================================================================
+   TICKER
+   ============================================================================ */
+function Ticker({ kpis, rows }) {
+  const items = kpis.length
+    ? kpis
+    : [{ label: "Records", value: fmtNum(rows.length) }];
+  const doubled = [...items, ...items];
+  return (
+    <div className="ticker-wrap">
+      <div className="ticker-track">
+        {doubled.map((k, i) => (
+          <span className="ticker-item" key={i}>
+            <span className="ticker-label">{k.label}</span>
+            <span className={`ticker-value ${k.isDelta ? (k.raw >= 0 ? "ticker-up" : "ticker-down") : ""}`}>
+              {k.value}
+            </span>
+          </span>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+/* ============================================================================
+   DASHBOARD VIEW
+   ============================================================================ */
+function DashboardView({ kpis, timeSeries, categoryBreakdown, rows, columns, revenueCol, dateCol, customerCol, ct, setView, anomalies, correlationMatrix, pyReady, pyLoadError }) {
+  const [insight, setInsight] = useState("");
+  const [loadingInsight, setLoadingInsight] = useState(false);
+  const [lang, setLang] = useState("hinglish");
+
+  const generateInsight = async () => {
+    setLoadingInsight(true);
+    try {
+      const text = await callPy("build_insight_narrative", lang, kpis, categoryBreakdown, revenueCol);
+      setInsight(text);
+    } catch (e) {
+      setInsight("Python engine abhi ready nahi hai — thoda ruk kar dobara try karo.");
+    }
+    setLoadingInsight(false);
+  };
+
+  return (
+    <div>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", fontSize: 12, color: "var(--muted)", marginBottom: 12 }}>
+        <span>
+          Detected — date: <strong style={{ color: "var(--text)" }}>{dateCol || "none"}</strong>,
+          {" "}revenue: <strong style={{ color: "var(--text)" }}>{revenueCol || "none"}</strong>,
+          {" "}customer: <strong style={{ color: "var(--text)" }}>{customerCol || "none"}</strong>
+        </span>
+        <button className="btn no-print" style={{ padding: "5px 10px" }} onClick={() => setView("upload")}>
+          Change mapping
+        </button>
+      </div>
+      <div className="kpi-grid">
+        {kpis.map((k, i) => (
+          <div className="card fade-in-up" key={k.label} style={{ animationDelay: `${i * 60}ms` }}>
+            <div className="card-title">{k.label}</div>
+            <div className="kpi-value">
+              <AnimatedNumber value={k.raw} format={(v) => formatKpiValue(k.kind, v)} />
+            </div>
+            {k.isDelta && (
+              <div className="kpi-delta" style={{ color: k.raw >= 0 ? "var(--pos)" : "var(--neg)" }}>
+                {k.raw >= 0 ? <ArrowUpRight size={13} /> : <ArrowDownRight size={13} />}
+                vs previous period
+              </div>
+            )}
+          </div>
+        ))}
+      </div>
+
+      <div className="card fade-in-up" style={{ marginBottom: 16, animationDelay: "120ms" }}>
+        <div className="card-title" style={{ justifyContent: "space-between" }}>
+          <span><Sparkles size={13} /> AI Insight <span className="lg-note-inline">(Python: numpy/pandas — no cloud API)</span></span>
+        </div>
+        <div className="no-print" style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 10, flexWrap: "wrap" }}>
+          <select className="bi-select" style={{ width: "auto" }} value={lang} onChange={(e) => setLang(e.target.value)}>
+            {LANGUAGES.map((l) => <option key={l.id} value={l.id}>{l.label}</option>)}
+          </select>
+          <button className="btn btn-accent" onClick={generateInsight} disabled={loadingInsight}>
+            {loadingInsight ? <Loader2 size={14} style={{ animation: "spin 1s linear infinite" }} /> : <Sparkles size={14} />}
+            Generate AI Insight
+          </button>
+        </div>
+        {insight && <div style={{ fontSize: 13.5, lineHeight: 1.6 }}>{insight}</div>}
+      </div>
+
+      <div className="grid-2">
+        <div className="card fade-in-up" style={{ animationDelay: "180ms" }}>
+          <div className="card-title"><BarChart3 size={13} /> Trend Over Time</div>
+          {timeSeries.length ? (
+            <ResponsiveContainer width="100%" height={260}>
+              <AreaChart data={timeSeries}>
+                <defs>
+                  <linearGradient id="rev" x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="0%" stopColor={ct.accent} stopOpacity={0.4} />
+                    <stop offset="100%" stopColor={ct.accent} stopOpacity={0} />
+                  </linearGradient>
+                </defs>
+                <CartesianGrid strokeDasharray="3 3" stroke={ct.grid} vertical={false} />
+                <XAxis dataKey="date" tick={{ fill: ct.tick, fontSize: 11 }} />
+                <YAxis tick={{ fill: ct.tick, fontSize: 11 }} tickFormatter={fmtMoney} />
+                <Tooltip
+                  contentStyle={{ background: ct.tooltipBg, border: `1px solid ${ct.tooltipBorder}`, fontSize: 12, borderRadius: 8, boxShadow: "0 8px 20px -6px rgba(0,0,0,0.35)" }}
+                  formatter={(v) => fmtNum(v)}
+                  cursor={{ stroke: ct.accent, strokeWidth: 1, strokeDasharray: "3 3" }}
+                />
+                <Area type="monotone" dataKey="value" stroke={ct.accent} fill="url(#rev)" strokeWidth={2.5}
+                  isAnimationActive={true} animationDuration={900} animationEasing="ease-out" />
+              </AreaChart>
+            </ResponsiveContainer>
+          ) : (
+            <EmptyHint text={pyLoadError ? "AI features load nahi hue (sidebar se retry karein)." : !pyReady ? "Python engine load ho raha hai\u2026" : "Date + numeric column nahi mila trend banane ke liye."} />
+          )}
+        </div>
+        <div className="card fade-in-up" style={{ animationDelay: "240ms" }}>
+          <div className="card-title">Top Categories</div>
+          {categoryBreakdown.length ? (
+            <ResponsiveContainer width="100%" height={260}>
+              <PieChart>
+                <Pie
+                  data={categoryBreakdown} dataKey="value" nameKey="name" innerRadius={50} outerRadius={85} paddingAngle={3}
+                  isAnimationActive={true} animationDuration={800} animationEasing="ease-out" animationBegin={100}
+                >
+                  {categoryBreakdown.map((_, i) => (
+                    <Cell key={i} fill={PIE_COLORS[i % PIE_COLORS.length]} stroke={ct.tooltipBg} strokeWidth={2} />
+                  ))}
+                </Pie>
+                <Tooltip contentStyle={{ background: ct.tooltipBg, border: `1px solid ${ct.tooltipBorder}`, fontSize: 12, borderRadius: 8, boxShadow: "0 8px 20px -6px rgba(0,0,0,0.35)" }} formatter={(v) => fmtNum(v)} />
+                <Legend wrapperStyle={{ fontSize: 11 }} />
+              </PieChart>
+            </ResponsiveContainer>
+          ) : (
+            <EmptyHint text={pyLoadError ? "AI features load nahi hue (sidebar se retry karein)." : !pyReady ? "Python engine load ho raha hai\u2026" : "Category breakdown ke liye text column nahi mila."} />
+          )}
+        </div>
+      </div>
+
+      {anomalies && anomalies.length > 0 && (
+        <div className="card fade-in-up" style={{ marginTop: 16 }}>
+          <div className="card-title"><AlertTriangle size={13} /> Unusual Periods Detected <span className="lg-note-inline">(numpy z-score, |z| ≥ 2)</span></div>
+          {anomalies.map((a, i) => (
+            <div className="anomaly-item" key={i}>
+              <span style={{ color: a.direction === "high" ? "var(--pos)" : "var(--neg)" }}>
+                {a.direction === "high" ? <ArrowUpRight size={13} /> : <ArrowDownRight size={13} />}
+              </span>
+              <span style={{ fontFamily: "'JetBrains Mono',monospace" }}>{a.date}</span>
+              <span>— {fmtNum(a.value)} ({a.direction === "high" ? "unusually high" : "unusually low"}, z={a.z})</span>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {correlationMatrix.columns && correlationMatrix.columns.length >= 2 && (
+        <div className="card fade-in-up" style={{ marginTop: 16 }}>
+          <div className="card-title">Correlation Matrix <span className="lg-note-inline">(pandas .corr() — which numbers move together)</span></div>
+          <div style={{ overflowX: "auto" }}>
+            <table className="bi-table" style={{ tableLayout: "fixed" }}>
+              <thead>
+                <tr>
+                  <th></th>
+                  {correlationMatrix.columns.map((c) => <th key={c} style={{ textAlign: "center" }}>{c}</th>)}
+                </tr>
+              </thead>
+              <tbody>
+                {correlationMatrix.matrix.map((row, i) => (
+                  <tr key={i}>
+                    <td style={{ fontFamily: "Inter,sans-serif", color: "var(--muted)" }}>{correlationMatrix.columns[i]}</td>
+                    {row.map((v, j) => {
+                      const alpha = Math.min(0.85, Math.abs(v));
+                      const bg = v >= 0 ? `rgba(74,222,128,${alpha * 0.5})` : `rgba(248,113,113,${alpha * 0.5})`;
+                      return (
+                        <td key={j} style={{ textAlign: "center", background: i === j ? "transparent" : bg, fontWeight: i === j ? 700 : 400 }}>
+                          {v.toFixed(2)}
+                        </td>
+                      );
+                    })}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function EmptyHint({ text }) {
+  return <div style={{ color: "var(--muted)", fontSize: 12.5, padding: "30px 0", textAlign: "center" }}>{text}</div>;
+}
+
+/* Lightweight count-up animation (no external animation library needed —
+   plain requestAnimationFrame with an ease-out curve). Animates from the
+   previous value to the new one whenever `value` changes, e.g. after a
+   date-range filter or a new file upload. */
+function AnimatedNumber({ value, format }) {
+  const [display, setDisplay] = useState(value || 0);
+  const fromRef = useRef(0);
+  const rafRef = useRef(null);
+
+  useEffect(() => {
+    const from = fromRef.current;
+    const to = typeof value === "number" && !isNaN(value) ? value : 0;
+    const duration = 700;
+    const startTime = performance.now();
+    if (rafRef.current) cancelAnimationFrame(rafRef.current);
+
+    function tick(now) {
+      const elapsed = now - startTime;
+      const t = Math.min(1, elapsed / duration);
+      const eased = 1 - Math.pow(1 - t, 3); // ease-out-cubic
+      const current = from + (to - from) * eased;
+      setDisplay(current);
+      if (t < 1) {
+        rafRef.current = requestAnimationFrame(tick);
+      } else {
+        fromRef.current = to;
+      }
+    }
+    rafRef.current = requestAnimationFrame(tick);
+    return () => { if (rafRef.current) cancelAnimationFrame(rafRef.current); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [value]);
+
+  return <>{format(display)}</>;
+}
+
+function formatKpiValue(kind, v) {
+  if (kind === "money") return fmtMoney(v);
+  if (kind === "percent") return `${v >= 0 ? "+" : ""}${v.toFixed(1)}%`;
+  return fmtNum(v);
+}
+
+/* ============================================================================
+   FORECAST VIEW
+   ============================================================================ */
+function ForecastView({ forecast, revenueCol, dateCol, rows, ct, growthBreakdown, pyReady, pyLoadError }) {
+  const [narrative, setNarrative] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [lang, setLang] = useState("hinglish");
+
+  const runForecastAI = async () => {
+    setLoading(true);
+    try {
+      const text = await callPy("build_forecast_narrative", lang, forecast, 6);
+      setNarrative(text);
+    } catch (e) {
+      setNarrative("Python engine abhi ready nahi hai — thoda ruk kar dobara try karo.");
+    }
+    setLoading(false);
+  };
+
+  if (!dateCol || !revenueCol || forecast.combined.length === 0) {
+    return (
+      <div className="card">
+        {pyLoadError ? (
+          <EmptyHint text="AI features load nahi hue (sidebar se retry karein)." />
+        ) : !pyReady ? (
+          <EmptyHint text="Python engine load ho raha hai — thoda ruk kar yeh page apne aap update ho jayega." />
+        ) : (
+          <EmptyHint text="Revenue forecast ke liye ek date column aur ek numeric (revenue-jaisa) column chahiye. Apna data upload karein ya sample data use karein." />
+        )}
+      </div>
+    );
+  }
+
+  return (
+    <div>
+      <div className="card fade-in-up" style={{ marginBottom: 16 }}>
+        <div className="card-title" style={{ flexWrap: "wrap", gap: 8 }}>
+          <TrendingUp size={13} /> Actual vs Predicted ({revenueCol})
+          <span className="lg-badge">{forecast.model === "quadratic" ? "curved trend" : "linear trend"}</span>
+          {forecast.seasonalityUsed && <span className="lg-badge">seasonal adjustment</span>}
+          <span className="lg-note-inline">numpy — R²={forecast.r2?.toFixed(2)}</span>
+        </div>
+        <ResponsiveContainer width="100%" height={320}>
+          <ComposedChart data={forecast.combined}>
+            <defs>
+              <linearGradient id="ciband" x1="0" y1="0" x2="0" y2="1">
+                <stop offset="0%" stopColor={ct.accent} stopOpacity={0.25} />
+                <stop offset="100%" stopColor={ct.accent} stopOpacity={0.05} />
+              </linearGradient>
+            </defs>
+            <CartesianGrid strokeDasharray="3 3" stroke={ct.grid} vertical={false} />
+            <XAxis dataKey="date" tick={{ fill: ct.tick, fontSize: 11 }} />
+            <YAxis tick={{ fill: ct.tick, fontSize: 11 }} tickFormatter={fmtMoney} />
+            <Tooltip
+              contentStyle={{ background: ct.tooltipBg, border: `1px solid ${ct.tooltipBorder}`, fontSize: 12, borderRadius: 8, boxShadow: "0 8px 20px -6px rgba(0,0,0,0.35)" }}
+              formatter={(v, name) => (v === null || v === undefined ? "\u2014" : [fmtNum(v), name])}
+              cursor={{ stroke: ct.accent, strokeWidth: 1, strokeDasharray: "3 3" }}
+            />
+            <Legend wrapperStyle={{ fontSize: 11 }} />
+            <Area dataKey="predictedHigh" name="Upper bound (~90%)" stroke="none" fill="url(#ciband)" isAnimationActive={true} animationDuration={900} connectNulls={false} />
+            <Area dataKey="predictedLow" name="Lower bound (~90%)" stroke="none" fill={ct.tooltipBg} fillOpacity={1} isAnimationActive={true} animationDuration={900} connectNulls={false} />
+            <Line type="monotone" dataKey="actual" name="Actual" stroke={ct.blue} strokeWidth={2.5} dot={false} connectNulls={false}
+              isAnimationActive={true} animationDuration={900} animationEasing="ease-out" />
+            <Line type="monotone" dataKey="predicted" name="Predicted" stroke={ct.accent} strokeWidth={2.5} strokeDasharray="5 4" dot={false} connectNulls={false}
+              isAnimationActive={true} animationDuration={900} animationEasing="ease-out" animationBegin={200} />
+          </ComposedChart>
+        </ResponsiveContainer>
+        <div className="lg-note-inline" style={{ marginLeft: 0, display: "block", marginTop: 4 }}>
+          Shaded band = rough ~90% prediction interval based on historical residual spread — wider further out, treat as a range not a point estimate.
+        </div>
+      </div>
+
+      <div className="card fade-in-up" style={{ animationDelay: "150ms", marginBottom: 16 }}>
+        <div className="card-title"><Sparkles size={13} /> AI Forecast Narrative <span className="lg-note-inline">(Python — no cloud API)</span></div>
+        <div className="no-print" style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 10, flexWrap: "wrap" }}>
+          <select className="bi-select" style={{ width: "auto" }} value={lang} onChange={(e) => setLang(e.target.value)}>
+            {LANGUAGES.map((l) => <option key={l.id} value={l.id}>{l.label}</option>)}
+          </select>
+          <button className="btn btn-accent" onClick={runForecastAI} disabled={loading}>
+            {loading ? <Loader2 size={14} style={{ animation: "spin 1s linear infinite" }} /> : <Sparkles size={14} />}
+            Explain This Forecast
+          </button>
+        </div>
+        {narrative && <div style={{ fontSize: 13.5, lineHeight: 1.6 }}>{narrative}</div>}
+      </div>
+
+      {growthBreakdown && growthBreakdown.length > 1 && (
+        <div className="card fade-in-up" style={{ animationDelay: "220ms" }}>
+          <div className="card-title">Period-over-Period Growth</div>
+          <table className="bi-table">
+            <thead><tr><th>Period</th><th>{revenueCol}</th><th>Change</th></tr></thead>
+            <tbody>
+              {growthBreakdown.slice().reverse().slice(0, 12).map((g, i) => (
+                <tr key={i}>
+                  <td>{g.date}</td>
+                  <td>{fmtNum(g.value)}</td>
+                  <td style={{ color: g.changePct == null ? "var(--muted)" : g.changePct >= 0 ? "var(--pos)" : "var(--neg)" }}>
+                    {g.changePct == null ? "\u2014" : `${g.changePct >= 0 ? "+" : ""}${g.changePct}%`}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ============================================================================
+   CUSTOMERS VIEW
+   ============================================================================ */
+function CustomersView({ customerRanking, customerSegments, customerCol, revenueCol, ct, downloadCSV, pyReady, pyLoadError }) {
+  const [showAll, setShowAll] = useState(false);
+  if (!customerRanking.length) {
+    return (
+      <div className="card">
+        {pyLoadError ? (
+          <EmptyHint text="AI features load nahi hue (sidebar se retry karein)." />
+        ) : !pyReady ? (
+          <EmptyHint text="Python engine load ho raha hai — thoda ruk kar yeh page apne aap update ho jayega." />
+        ) : (
+          <EmptyHint text="Customer analytics ke liye ek text column (customer/client/name) aur ek numeric column chahiye." />
+        )}
+      </div>
+    );
+  }
+  const top10 = customerRanking.slice(0, 10);
+  const RANKING_PAGE_SIZE = 25;
+  const visibleRanking = showAll ? customerRanking : customerRanking.slice(0, RANKING_PAGE_SIZE);
+
+  return (
+    <div>
+      <div className="grid-2" style={{ marginBottom: 16 }}>
+        <div className="card fade-in-up">
+          <div className="card-title"><Users size={13} /> Top {customerCol} by {revenueCol}</div>
+          <ResponsiveContainer width="100%" height={300}>
+            <BarChart data={top10} layout="vertical" margin={{ left: 10 }}>
+              <CartesianGrid strokeDasharray="3 3" stroke={ct.grid} horizontal={false} />
+              <XAxis type="number" tick={{ fill: ct.tick, fontSize: 11 }} tickFormatter={fmtMoney} />
+              <YAxis type="category" dataKey="name" width={110} tick={{ fill: ct.tick, fontSize: 11 }} />
+              <Tooltip
+                contentStyle={{ background: ct.tooltipBg, border: `1px solid ${ct.tooltipBorder}`, fontSize: 12, borderRadius: 8, boxShadow: "0 8px 20px -6px rgba(0,0,0,0.35)" }}
+                formatter={(v) => fmtNum(v)}
+                cursor={{ fill: ct.accent, opacity: 0.08 }}
+              />
+              <Bar dataKey="value" fill={ct.accent} radius={[0, 4, 4, 0]} isAnimationActive={true} animationDuration={800} animationEasing="ease-out" />
+            </BarChart>
+          </ResponsiveContainer>
+        </div>
+        <div className="card fade-in-up" style={{ animationDelay: "120ms" }}>
+          <div className="card-title">Value Segments</div>
+          <ResponsiveContainer width="100%" height={300}>
+            <PieChart>
+              <Pie
+                data={customerSegments} dataKey="value" nameKey="name" innerRadius={55} outerRadius={90} paddingAngle={3}
+                isAnimationActive={true} animationDuration={800} animationEasing="ease-out" animationBegin={100}
+              >
+                {customerSegments.map((_, i) => (
+                  <Cell key={i} fill={PIE_COLORS[i % PIE_COLORS.length]} stroke={ct.tooltipBg} strokeWidth={2} />
+                ))}
+              </Pie>
+              <Tooltip contentStyle={{ background: ct.tooltipBg, border: `1px solid ${ct.tooltipBorder}`, fontSize: 12, borderRadius: 8, boxShadow: "0 8px 20px -6px rgba(0,0,0,0.35)" }} formatter={(v) => fmtNum(v)} />
+              <Legend wrapperStyle={{ fontSize: 11 }} />
+            </PieChart>
+          </ResponsiveContainer>
+        </div>
+      </div>
+
+      <div className="card fade-in-up" style={{ animationDelay: "200ms" }}>
+        <div className="card-title" style={{ display: "flex", justifyContent: "space-between" }}>
+          <span>Full Ranking</span>
+          <button
+            className="btn no-print"
+            style={{ padding: "4px 10px" }}
+            onClick={() => downloadCSV(customerRanking.map((c) => ({ [customerCol]: c.name, [revenueCol]: c.value })), "customer_ranking.csv")}
+          >
+            <FileDown size={12} /> Download CSV
+          </button>
+        </div>
+        <table className="bi-table">
+          <thead>
+            <tr><th>#</th><th>{customerCol}</th><th>{revenueCol}</th><th>Share</th></tr>
+          </thead>
+          <tbody>
+            {visibleRanking.map((c, i) => {
+              const total = customerRanking.reduce((s, x) => s + x.value, 0);
+              return (
+                <tr key={i}>
+                  <td>{i + 1}</td>
+                  <td style={{ fontFamily: "Inter,sans-serif" }}>{c.name}</td>
+                  <td>{fmtNum(c.value)}</td>
+                  <td>{((c.value / total) * 100).toFixed(1)}%</td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+        {customerRanking.length > RANKING_PAGE_SIZE && (
+          <div style={{ textAlign: "center", marginTop: 12 }}>
+            <button className="btn no-print" onClick={() => setShowAll((s) => !s)}>
+              {showAll ? `Show top ${RANKING_PAGE_SIZE}` : `Show all ${customerRanking.length}`}
+            </button>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/* ============================================================================
+   SQL GENERATOR VIEW
+   ============================================================================ */
+function SQLGeneratorView({ columns, numericCols, stringCols, fileName }) {
+  const [question, setQuestion] = useState("");
+  const [sql, setSql] = useState("");
+  const [matched, setMatched] = useState(true);
+  const [loading, setLoading] = useState(false);
+  const [copied, setCopied] = useState(false);
+
+  const generate = async () => {
+    if (!question.trim()) return;
+    setLoading(true);
+    setSql("");
+    try {
+      const result = await callPy("generate_sql", question, columns, numericCols);
+      setSql(result.sql);
+      setMatched(result.matched);
+    } catch (e) {
+      setSql("-- Python engine abhi ready nahi hai, thoda ruk kar dobara try karo.");
+      setMatched(false);
+    }
+    setLoading(false);
+  };
+
+  const copy = () => {
+    navigator.clipboard.writeText(sql);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 1500);
+  };
+
+  return (
+    <div>
+      <div className="card" style={{ marginBottom: 16 }}>
+        <div className="card-title"><Database size={13} /> Schema detected from {fileName}</div>
+        <div style={{ fontSize: 12.5, color: "var(--muted)", fontFamily: "'JetBrains Mono',monospace" }}>
+          {columns.join(",  ")}
+        </div>
+      </div>
+
+      <div className="card" style={{ marginBottom: 16 }}>
+        <div className="card-title">Describe what you want in plain English <span className="lg-note-inline">(Python pattern-matching — no cloud API)</span></div>
+        <div className="no-print" style={{ fontSize: 12, color: "var(--muted)", marginBottom: 8 }}>
+          Simple, direct phrasing kaam karti hai: "top 5 customer by revenue", "total revenue", "average units", "lowest 3 region by cost"
+        </div>
+        <textarea
+          className="bi-textarea no-print"
+          placeholder="e.g. top 5 customer by revenue"
+          value={question}
+          onChange={(e) => setQuestion(e.target.value)}
+        />
+        <div className="no-print" style={{ marginTop: 10 }}>
+          <button className="btn btn-accent" onClick={generate} disabled={loading || !question.trim()}>
+            {loading ? <Loader2 size={14} style={{ animation: "spin 1s linear infinite" }} /> : <Terminal size={14} />}
+            Generate SQL
+          </button>
+        </div>
+      </div>
+
+      {sql && (
+        <div className="card">
+          <div className="card-title" style={{ display: "flex", justifyContent: "space-between" }}>
+            <span>Generated SQL</span>
+            <button className="btn no-print" style={{ padding: "4px 10px" }} onClick={copy} aria-label="Copy SQL to clipboard">
+              {copied ? <Check size={12} /> : <Copy size={12} />} {copied ? "Copied" : "Copy"}
+            </button>
+          </div>
+          <div className="code-block">{sql}</div>
+          {!matched && (
+            <div style={{ fontSize: 12, color: "var(--neg)", marginTop: 8 }}>
+              Pattern match nahi hua — thoda simple tarike se phir try karo, jaise "top N &lt;group&gt; by &lt;metric&gt;".
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ============================================================================
+   CHAT VIEW
+   ============================================================================ */
+function ChatView({ rows, columns, kpis, revenueCol, customerCol, dateCol, filtered }) {
+  const [messages, setMessages] = useState([
+    { role: "ai", text: "Hi! Apne data ke baare me kuch bhi poochho \u2014 jaise 'sabse zyada revenue kis customer se aaya?' ya 'total revenue kitna hai?'" },
+  ]);
+  const [input, setInput] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [lang, setLang] = useState("hinglish");
+  const scrollRef = useRef(null);
+
+  const send = async () => {
+    if (!input.trim() || loading) return;
+    const userMsg = input.trim();
+    setMessages((m) => [...m, { role: "user", text: userMsg }]);
+    setInput("");
+    setLoading(true);
+
+    try {
+      const text = await callPy("answer_chat", userMsg, rows, revenueCol, customerCol, dateCol, lang);
+      setMessages((m) => [...m, { role: "ai", text }]);
+    } catch (e) {
+      setMessages((m) => [...m, { role: "ai", text: "Python engine abhi ready nahi hai \u2014 thoda ruk kar dobara try karo." }]);
+    }
+    setLoading(false);
+    setTimeout(() => scrollRef.current?.scrollTo({ top: 999999, behavior: "smooth" }), 50);
+  };
+
+  return (
+    <div className="card" style={{ display: "flex", flexDirection: "column", height: "60vh", padding: 0, overflow: "hidden" }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "10px 14px", borderBottom: "1px solid var(--border)" }}>
+        <span className="lg-note-inline" style={{ marginLeft: 0 }}>
+          Rule-based over pandas — no cloud API{filtered ? " · date filter active" : ""}
+        </span>
+        <select className="bi-select" style={{ width: "auto" }} value={lang} onChange={(e) => setLang(e.target.value)}>
+          {LANGUAGES.map((l) => <option key={l.id} value={l.id}>{l.label}</option>)}
+        </select>
+      </div>
+      <div className="chat-scroll" ref={scrollRef}>
+        {messages.map((m, i) => (
+          <div key={i} className={m.role === "user" ? "chat-bubble-user" : "chat-bubble-ai"}>
+            {m.text}
+          </div>
+        ))}
+        {loading && <div className="chat-bubble-ai" style={{ color: "var(--muted)" }}>Soch raha hoon...</div>}
+      </div>
+      <div className="chat-input-row">
+        <input
+          className="chat-input"
+          placeholder="Apna sawaal type karein..."
+          value={input}
+          onChange={(e) => setInput(e.target.value)}
+          onKeyDown={(e) => { if (e.key === "Enter" && !e.nativeEvent.isComposing) send(); }}
+        />
+        <button className="btn btn-accent" onClick={send} disabled={loading}>
+          <Send size={14} />
+        </button>
+      </div>
+    </div>
+  );
+}
+
+/* ============================================================================
+   UPLOAD VIEW
+   ============================================================================ */
+function UploadView({
+  onDrop, fileInputRef, handleFile, fileName, rows, columns,
+  autoDetected, dateCol, revenueCol, customerCol,
+  manualDate, manualRevenue, manualCustomer,
+  setManualDate, setManualRevenue, setManualCustomer,
+  sheetNames, activeSheet, switchSheet, loadSampleData, downloadCSV, dataQuality,
+}) {
+  return (
+    <div>
+      <div
+        className="dropzone"
+        onDrop={onDrop}
+        onDragOver={(e) => e.preventDefault()}
+        onClick={() => fileInputRef.current?.click()}
+      >
+        <Upload size={30} style={{ color: "var(--accent)", marginBottom: 10 }} />
+        <div style={{ fontWeight: 600, marginBottom: 4 }}>CSV ya Excel file yahan drop karein</div>
+        <div style={{ color: "var(--muted)", fontSize: 12.5 }}>ya click karke browse karein · .csv, .xlsx, .xls supported · column ka naam kuch bhi ho, chalega</div>
+      </div>
+
+      {sheetNames && sheetNames.length > 1 && (
+        <div className="card" style={{ marginTop: 16 }}>
+          <div className="card-title">Sheet</div>
+          <div style={{ fontSize: 12.5, color: "var(--muted)", marginBottom: 10 }}>
+            Is workbook mein {sheetNames.length} sheets hain — jo dekhni ho woh chuno.
+          </div>
+          <select className="bi-select" value={activeSheet || ""} onChange={(e) => switchSheet(e.target.value)}>
+            {sheetNames.map((s) => <option key={s} value={s}>{s}</option>)}
+          </select>
+        </div>
+      )}
+
+      <div className="card" style={{ marginTop: 16 }}>
+        <div className="card-title">Column Mapping</div>
+        <div style={{ fontSize: 12.5, color: "var(--muted)", marginBottom: 12 }}>
+          App ne yeh roles khud detect kiye hain. Agar galat lage (column names alag/ajeeb hain), yahan se sahi column chun lo — Dashboard, Forecast aur Customer views turant update ho jayenge.
+        </div>
+        <div className="grid-3">
+          <MappingSelect
+            label="Date column"
+            columns={columns}
+            value={manualDate ?? autoDetected.dateCol ?? ""}
+            autoValue={autoDetected.dateCol}
+            onChange={(v) => setManualDate(v || null)}
+          />
+          <MappingSelect
+            label="Revenue / value column"
+            columns={columns}
+            value={manualRevenue ?? autoDetected.revenueCol ?? ""}
+            autoValue={autoDetected.revenueCol}
+            onChange={(v) => setManualRevenue(v || null)}
+          />
+          <MappingSelect
+            label="Customer / entity column"
+            columns={columns}
+            value={manualCustomer ?? autoDetected.customerCol ?? ""}
+            autoValue={autoDetected.customerCol}
+            onChange={(v) => setManualCustomer(v || null)}
+          />
+        </div>
+      </div>
+
+      <div className="card" style={{ marginTop: 16 }}>
+        <div className="card-title" style={{ display: "flex", justifyContent: "space-between" }}>
+          <span>Currently loaded</span>
+          <span style={{ display: "flex", gap: 8 }}>
+            <button className="btn no-print" style={{ padding: "4px 10px" }} onClick={() => downloadCSV(rows, "data_export.csv")}>
+              <FileDown size={12} /> Download CSV
+            </button>
+            <button className="btn no-print" style={{ padding: "4px 10px" }} onClick={loadSampleData}>
+              Load Sample Data
+            </button>
+          </span>
+        </div>
+        <div style={{ fontSize: 13, marginBottom: 10 }}>
+          <strong>{fileName}</strong> · {rows.length} rows · {columns.length} columns
+        </div>
+        <table className="bi-table">
+          <thead>
+            <tr>{columns.map((c) => <th key={c}>{c}</th>)}</tr>
+          </thead>
+          <tbody>
+            {rows.slice(0, 8).map((r, i) => (
+              <tr key={i}>
+                {columns.map((c) => <td key={c} style={{ fontFamily: "Inter,sans-serif" }}>{String(r[c])}</td>)}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+
+      {dataQuality && dataQuality.columns && dataQuality.columns.length > 0 && (
+        <div className="card" style={{ marginTop: 16 }}>
+          <div className="card-title">Data Quality <span className="lg-note-inline">(pandas — computed on upload)</span></div>
+          <div style={{ display: "flex", gap: 20, marginBottom: 10, fontSize: 12.5, color: "var(--muted)" }}>
+            <span>Total rows: <strong style={{ color: "var(--text)" }}>{fmtNum(dataQuality.totalRows)}</strong></span>
+            <span>Duplicate rows: <strong style={{ color: dataQuality.duplicateRows > 0 ? "var(--neg)" : "var(--text)" }}>{fmtNum(dataQuality.duplicateRows)}</strong></span>
+          </div>
+          {dataQuality.columns.map((c) => (
+            <div className="quality-row" key={c.name}>
+              <span style={{ fontFamily: "'JetBrains Mono',monospace" }}>{c.name}</span>
+              <span style={{ color: "var(--muted)" }}>{c.kind} · {c.uniqueCount} unique</span>
+              <span style={{ color: c.nullPct > 0 ? "var(--neg)" : "var(--pos)" }}>
+                {c.nullPct > 0 ? `${c.nullPct}% missing` : "complete"}
+              </span>
+            </div>
+          ))}
+          {dataQuality.dateDiagnostics && (
+            <div
+              style={{
+                marginTop: 12, paddingTop: 10, borderTop: "1px solid var(--border)",
+                fontSize: 12.5, color: "var(--muted)", display: "flex", flexDirection: "column", gap: 3,
+              }}
+            >
+              <span>
+                Date column <strong style={{ color: "var(--text)", fontFamily: "'JetBrains Mono',monospace" }}>{dataQuality.dateDiagnostics.column}</strong> read
+                as <strong style={{ color: "var(--text)" }}>{dataQuality.dateDiagnostics.format}</strong>
+                {dataQuality.dateDiagnostics.confirmedByData
+                  ? " — confirmed unambiguously from values in this column."
+                  : " — assumed by default (no value in this column proved it either way); if that's wrong for your file, reformat dates as YYYY-MM-DD to remove the ambiguity."}
+              </span>
+              {dataQuality.dateDiagnostics.unparsedCount > 0 && (
+                <span style={{ color: "var(--neg)" }}>
+                  {dataQuality.dateDiagnostics.unparsedCount} value(s) ({dataQuality.dateDiagnostics.unparsedPct}%) in this column didn't parse as a date and were dropped from the trend/forecast.
+                </span>
+              )}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ============================================================================
+   MAPPING SELECT (small dropdown used in the Column Mapping card)
+   ============================================================================ */
+function MappingSelect({ label, columns, value, autoValue, onChange }) {
+  return (
+    <div>
+      <div style={{ fontSize: 11, color: "var(--muted)", textTransform: "uppercase", letterSpacing: ".04em", marginBottom: 6 }}>
+        {label}
+      </div>
+      <select className="bi-select" value={value} onChange={(e) => onChange(e.target.value)}>
+        <option value="">— none —</option>
+        {columns.map((c) => (
+          <option key={c} value={c}>
+            {c}{c === autoValue ? " (auto-detected)" : ""}
+          </option>
+        ))}
+      </select>
+    </div>
+  );
+}
+
+/* ============================================================================
+   ERROR BOUNDARY — catches unexpected render crashes so the user sees a
+   friendly recovery screen instead of a blank white page.
+   ============================================================================ */
+class ErrorBoundary extends React.Component {
+  constructor(props) {
+    super(props);
+    this.state = { hasError: false, message: "" };
+  }
+  static getDerivedStateFromError(error) {
+    return { hasError: true, message: (error && error.message) || String(error) };
+  }
+  componentDidCatch(error, info) {
+    console.error("[LedgerAI] Unexpected error:", error, info);
+  }
+  render() {
+    if (this.state.hasError) {
+      return (
+        <div style={{
+          minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center",
+          background: "#0B0E14", color: "#E7E9EE", fontFamily: "Inter,system-ui,sans-serif", padding: 24, textAlign: "center",
+        }}>
+          <div style={{ maxWidth: 440 }}>
+            <div style={{ fontSize: 16, fontWeight: 700, marginBottom: 8 }}>Kuch galat ho gaya</div>
+            <div style={{ color: "#8A93A6", fontSize: 13, marginBottom: 16 }}>
+              Ek unexpected error aa gaya. Aapka data safe hai (browser storage mein). Reload karke dobara try karein.
+            </div>
+            <div style={{ color: "#8A93A6", fontSize: 11, marginBottom: 16, fontFamily: "monospace", wordBreak: "break-word" }}>
+              {this.state.message}
+            </div>
+            <button
+              onClick={() => window.location.reload()}
+              style={{ background: "#E8B34D", color: "#1a1305", border: "none", borderRadius: 7, padding: "10px 18px", fontWeight: 600, cursor: "pointer" }}
+            >
+              Reload karein
+            </button>
+          </div>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
+
+const root = ReactDOM.createRoot(document.getElementById("root"));
+root.render(<ErrorBoundary><BIDashboard /></ErrorBoundary>);
+</script>
+</body>
+</html>
